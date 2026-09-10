@@ -20,7 +20,8 @@ import {
   assertChain, bytes32, cachedLeaves, ERC20, poolTree, read, rpc, syncLeaves, TORNADO, VERIFIER,
 } from './chain.ts';
 import {
-  ARTIFACTS, ASSETS, HOME, type Pool, pool, pools as allPools, RELEASE, setRpcUrl, UsageError,
+  ARTIFACTS, ASSETS, chainName, customRpc, defaultChains, HOME, parseChain, type Pool, pool, pools, RELEASE, rpcUrl,
+  setRpcUrl, UsageError,
 } from './config.ts';
 import {
   buildTree, createNote, hashLeftRight, hex32, parseNote, pedersen, treePath, zeroValues, ZERO_VALUE,
@@ -79,19 +80,38 @@ const noteKey = (n: { currency: string; amount: string }) => `${n.currency}-${n.
 /** The pool a note belongs to, on the chain the note was made for. */
 function notePool(n: { currency: string; amount: string; netId: number }): [string, Pool] {
   const key = noteKey(n);
-  const p = pool(key);
-  if (n.netId !== p.chainId) throw new UsageError(`note is for chain ${n.netId}, but ${key} is registered on chain ${p.chainId}`);
-  return [key, p];
+  return [key, pool(n.netId, key)];
+}
+
+/**
+ * An RPC client and the chain it serves. The chain is `chain` if known (a
+ * note's, or --chain); else --rpc-url's own; else Ethereum. The RPC is
+ * --rpc-url if given, else that chain's public default -- checked either way.
+ */
+async function connect(chain?: number): Promise<{ net: RpcClient; chainId: number }> {
+  if (chain === undefined && customRpc()) {
+    const net = rpc(rpcUrl());
+    return { net, chainId: Number(await net.chainId()) };
+  }
+  const chainId = chain ?? 1;
+  const net = rpc(rpcUrl(chainId));
+  await assertChain(net, chainId);
+  return { net, chainId };
+}
+
+/** A pool by name: on --chain, or the chain --rpc-url is on, or Ethereum. */
+async function connectPool(key: string, chain?: number): Promise<{ net: RpcClient; p: Pool }> {
+  const { net, chainId } = await connect(chain);
+  return { net, p: pool(chainId, key) };
 }
 
 /** Refuse to send money to an address that is not the pool the registry claims. */
 async function assertPool(net: RpcClient, p: Pool, key: string) {
-  await assertChain(net, p.chainId);
   let denomination: bigint;
   try {
     denomination = await read(net, p.address, TORNADO.denomination);
   } catch {
-    throw new UsageError(`no Tornado pool at ${p.address} on chain ${p.chainId} (registry entry ${key})`);
+    throw new UsageError(`no Tornado pool at ${p.address} on ${chainName(p.chainId)} (registry entry ${key})`);
   }
   if (denomination !== parseUnits(p.amount, p.decimals)) {
     throw new UsageError(`${p.address} has denomination ${denomination}, not ${p.amount} ${p.symbol}`);
@@ -166,12 +186,10 @@ async function selftest(threads: number) {
 // pools / verify
 // ---------------------------------------------------------------------------
 
-/** Registry entries for the chain the RPC is on. */
-async function poolsHere(net: RpcClient): Promise<[string, Pool][]> {
-  const chainId = Number(await net.chainId());
-  const here = Object.entries(allPools()).filter(([, p]) => p.chainId === chainId);
-  if (!here.length) throw new UsageError(`no pools registered for chain ${chainId} -- is --rpc-url on the right network?`);
-  return here;
+/** The chains `pools` and `verify` cover: the one --chain or --rpc-url names, else all. */
+async function networks(chain?: number) {
+  if (chain !== undefined || customRpc()) return [await connect(chain)];
+  return Promise.all(defaultChains().map((id) => connect(id)));
 }
 
 /** Decode a multicall result; undefined when the call failed or hit an address with no code. */
@@ -179,57 +197,63 @@ function decoded<T>(r: { success: boolean; data: string }, decode: (b: Uint8Arra
   return r.success && r.data !== '0x' ? decode(fromHex(r.data)) : undefined;
 }
 
-async function poolsCmd() {
-  const net = rpc();
-  const entries = await poolsHere(net);
-  const res = await net.multicall(
-    entries.map(([, p]) => ({ to: p.address, data: hexBytes(TORNADO.nextIndex.encodeInput()), allowFailure: true })),
-  );
-  out(`${'POOL'.padEnd(14)} ${'ADDRESS'.padEnd(42)} ${'DEPOSITS'.padStart(9)}`);
-  entries.forEach(([key, p], i) => {
-    const n = decoded(res[i]!, (b) => TORNADO.nextIndex.decodeOutput(b));
-    out(`${key.padEnd(14)} ${p.address.padEnd(42)} ${(n === undefined ? 'no pool' : String(n)).padStart(9)}`);
-  });
+async function poolsCmd(chain?: number) {
+  for (const [c, { net, chainId }] of (await networks(chain)).entries()) {
+    const entries = Object.entries(pools(chainId));
+    const res = await net.multicall(
+      entries.map(([, p]) => ({ to: p.address, data: hexBytes(TORNADO.nextIndex.encodeInput()), allowFailure: true })),
+    );
+    out(`${c ? '\n' : ''}${chainName(chainId)}`);
+    out(`${'POOL'.padEnd(14)} ${'ADDRESS'.padEnd(42)} ${'DEPOSITS'.padStart(9)}`);
+    entries.forEach(([key, p], i) => {
+      const n = decoded(res[i]!, (b) => TORNADO.nextIndex.decodeOutput(b));
+      out(`${key.padEnd(14)} ${p.address.padEnd(42)} ${(n === undefined ? 'no pool' : String(n)).padStart(9)}`);
+    });
+  }
 }
 
 /** Re-check every pool against the chain. A pool with no code is exactly what this is for. */
-async function verifyCmd() {
-  const net = rpc();
-  const entries = await poolsHere(net);
-  const res = await net.multicall(
-    entries.flatMap(([, p]) => [
-      { to: p.address, data: hexBytes(TORNADO.denomination.encodeInput()), allowFailure: true },
-      { to: p.address, data: hexBytes(TORNADO.levels.encodeInput()), allowFailure: true },
-    ]),
-  );
+async function verifyCmd(chain?: number) {
   let bad = 0;
-  entries.forEach(([key, p], i) => {
-    const denom = decoded(res[2 * i]!, (b) => TORNADO.denomination.decodeOutput(b));
-    const levels = decoded(res[2 * i + 1]!, (b) => TORNADO.levels.decodeOutput(b));
-    const want = parseUnits(p.amount, p.decimals);
-    if (denom === want && Number(levels) === 20) return out(`  ${key.padEnd(14)} OK`);
-    bad++;
-    out(denom === undefined
-      ? `  ${key.padEnd(14)} MISMATCH no Tornado pool at ${p.address}`
-      : `  ${key.padEnd(14)} MISMATCH denomination=${denom} want=${want} levels=${levels}`);
-  });
+  let total = 0;
+  for (const { net, chainId } of await networks(chain)) {
+    const entries = Object.entries(pools(chainId));
+    const res = await net.multicall(
+      entries.flatMap(([, p]) => [
+        { to: p.address, data: hexBytes(TORNADO.denomination.encodeInput()), allowFailure: true },
+        { to: p.address, data: hexBytes(TORNADO.levels.encodeInput()), allowFailure: true },
+      ]),
+    );
+    out(chainName(chainId));
+    entries.forEach(([key, p], i) => {
+      total++;
+      const denom = decoded(res[2 * i]!, (b) => TORNADO.denomination.decodeOutput(b));
+      const levels = decoded(res[2 * i + 1]!, (b) => TORNADO.levels.decodeOutput(b));
+      const want = parseUnits(p.amount, p.decimals);
+      if (denom === want && Number(levels) === 20) return out(`  ${key.padEnd(14)} OK`);
+      bad++;
+      out(denom === undefined
+        ? `  ${key.padEnd(14)} MISMATCH no Tornado pool at ${p.address}`
+        : `  ${key.padEnd(14)} MISMATCH denomination=${denom} want=${want} levels=${levels}`);
+    });
+  }
   if (bad) throw new Error(`${bad} pool(s) DO NOT match the chain -- do not use them`);
-  log(`all ${entries.length} pools verified`);
+  log(`all ${total} pools verified`);
 }
 
 // ---------------------------------------------------------------------------
 // note / deposit / sync / status
 // ---------------------------------------------------------------------------
-async function noteCmd(key: string | undefined) {
+async function noteCmd(key: string | undefined, chain?: number) {
   if (!key) throw new UsageError('usage: uragan note <pool>');
-  const p = pool(key);
+  // Offline unless --rpc-url is given, in which case its chain decides.
+  const p = pool(customRpc() ? (await connect(chain)).chainId : (chain ?? 1), key);
   out(createNote(p.currency, p.amount, p.chainId).note);
 }
 
-async function deposit(key: string | undefined, sig: SignerOpts) {
+async function deposit(key: string | undefined, chain: number | undefined, sig: SignerOpts) {
   if (!key) throw new UsageError('usage: uragan deposit <pool>');
-  const p = pool(key);
-  const net = rpc();
+  const { net, p } = await connectPool(key, chain);
   await assertPool(net, p, key);
   const signer = await makeSigner(net, sig);
   const amount = parseUnits(p.amount, p.decimals);
@@ -261,7 +285,7 @@ async function deposit(key: string | undefined, sig: SignerOpts) {
   // is unrecoverable; an orphan note for a failed deposit is harmless.
   const dir = join(HOME, 'notes');
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const file = join(dir, `${new Date().toISOString().replace(/[:.]/g, '')}-${key}.txt`);
+  const file = join(dir, `${new Date().toISOString().replace(/[:.]/g, '')}-${chainName(p.chainId).toLowerCase()}-${key}.txt`);
   writeFileSync(file, n.note + '\n', { mode: 0o600 });
   out(n.note);
   log(`note saved to ${file} -- back it up. Without it the funds are GONE.`);
@@ -274,11 +298,9 @@ async function deposit(key: string | undefined, sig: SignerOpts) {
   }
 }
 
-async function syncCmd(key: string | undefined) {
+async function syncCmd(key: string | undefined, chain?: number) {
   if (!key) throw new UsageError('usage: uragan sync <pool>');
-  const p = pool(key);
-  const net = rpc();
-  await assertChain(net, p.chainId);
+  const { net, p } = await connectPool(key, chain);
   const leaves = await syncLeaves(net, p, log);
   log(`${key}: ${leaves.length} leaves cached`);
 }
@@ -286,14 +308,13 @@ async function syncCmd(key: string | undefined) {
 async function status(noteArg: string | undefined) {
   const n = parseNote(await readNote(noteArg));
   const [key, p] = notePool(n);
-  const net = rpc();
-  await assertChain(net, p.chainId);
+  const { net } = await connect(p.chainId);
   const [deposited, spent, total] = await Promise.all([
     read(net, p.address, TORNADO.commitments, bytes32(n.commitment)),
     read(net, p.address, TORNADO.isSpent, bytes32(n.nullifierHash)),
     read(net, p.address, TORNADO.nextIndex),
   ]);
-  out(`pool          ${key}  (${p.address})`);
+  out(`pool          ${key} on ${chainName(p.chainId)}  (${p.address})`);
   out(`commitment    ${hex32(n.commitment)}`);
   out(`nullifierHash ${hex32(n.nullifierHash)}`);
   out(`deposited     ${deposited}`);
@@ -301,7 +322,7 @@ async function status(noteArg: string | undefined) {
   out(`anonymity set ${total} deposits`);
   const idx = [...cachedLeaves(p)].find(([, c]) => c === n.commitment)?.[0];
   if (idx !== undefined) out(`leaf index    ${idx}  (${Number(total) - idx - 1} deposits since)`);
-  else if (deposited) log(`(run \`uragan sync ${key}\` to see the leaf index)`);
+  else if (deposited) log(`(run \`uragan sync ${key} --chain ${chainName(p.chainId).toLowerCase()}\` to see the leaf index)`);
 }
 
 // ---------------------------------------------------------------------------
@@ -439,8 +460,7 @@ async function withdraw(noteArg: string | undefined, recipientArg: string | unde
   // The contract requires msg.value == refund; ETH pools only accept 0.
   if (refund !== 0n && !p.tokenAddress) throw new UsageError('ETH pools require --refund 0 (refund is for token pools)');
   const amount = parseUnits(p.amount, p.decimals);
-  const net = rpc();
-  await assertChain(net, p.chainId);
+  const { net } = await connect(p.chainId);
   // Resolve a --self signer before syncing and proving, so a misconfigured
   // wallet or key fails in a second rather than after all that work.
   const signer = o.self && !o.dryRun ? await makeSigner(net, o) : undefined;
@@ -456,7 +476,11 @@ async function withdraw(noteArg: string | undefined, recipientArg: string | unde
   let fee = 0n;
   if (o.relayer) {
     const st = await relayerStatus(o.relayer);
-    if (st.netId !== undefined && Number(st.netId) !== p.chainId) throw new UsageError(`relayer serves chain ${st.netId}`);
+    if (st.netId !== undefined && Number(st.netId) !== p.chainId) {
+      throw new UsageError(
+        `relayer ${o.relayer} serves ${chainName(Number(st.netId))} (${st.netId}), but this note is for ${chainName(p.chainId)} (${p.chainId})`,
+      );
+    }
     relayer = checksummed(st.rewardAccount);
     if (explicitFee !== undefined) {
       fee = explicitFee;
@@ -558,7 +582,7 @@ const HELP = `uragan -- Tornado Cash from the command line
 
   setup                        fetch + verify circuit and keys, run selftest
   selftest                     crypto vectors, plus an offline prove + verify
-  pools                        pools on this chain, with live deposit counts
+  pools                        every pool, with live deposit counts
   verify                       re-check every pool address on-chain
   note <pool>                  generate a note offline (no transaction)
   deposit <pool>               generate a note and deposit
@@ -567,7 +591,10 @@ const HELP = `uragan -- Tornado Cash from the command line
   withdraw <note|-> <to>       --relayer URL [--fee WEI] | --self   [--refund WEI] [--dry-run]
   relayers <url>...            query relayer /status endpoints
 
-  --rpc-url URL                RPC for reads and transactions (default: $ETH_RPC_URL)
+  --chain NAME                 the chain a <pool> is on: ethereum (default), optimism, arbitrum.
+                               Notes carry their own chain
+  --rpc-url URL                your own RPC instead of the public default -- a node, or a
+                               wallet like Frame to sign. Without --chain, its chain is used
   --max-fee-percent N          refuse a relayer-computed fee above N% of the amount (default 5)
   --threads N                  prover threads (default: all cores)
 
@@ -579,7 +606,7 @@ signing (deposit, withdraw --self) -- a local key, or else the wallet at --rpc-u
   (no key)                     eth_sendTransaction to --rpc-url; the wallet signs.
                                --from ADDR picks the account (Frame: http://127.0.0.1:1248)
 
-env: ETH_RPC_URL, URAGAN_HOME, URAGAN_CHUNK, URAGAN_INSTANCES, URAGAN_ASSETS
+env: URAGAN_HOME, URAGAN_CHUNK, URAGAN_INSTANCES, URAGAN_ASSETS
 Pass \`-\` for a note to read it from stdin, keeping it out of argv and shell history.`;
 
 const OPTIONS = {
@@ -591,6 +618,7 @@ const OPTIONS = {
   'dry-run': { type: 'boolean' },
   account: { type: 'string' },
   keystore: { type: 'string' },
+  chain: { type: 'string' },
   'rpc-url': { type: 'string' },
   'private-key': { type: 'string' },
   from: { type: 'string' },
@@ -608,6 +636,7 @@ async function main() {
   const { values: v, positionals } = parsed;
   const [cmd, ...rest] = positionals;
   setRpcUrl(v['rpc-url']);
+  const chain = v.chain === undefined ? undefined : parseChain(v.chain);
   const threads = intFlag('threads', v.threads, availableParallelism(), 1, 256);
   const maxFeePercent = v['max-fee-percent'] === undefined ? 5 : Number(v['max-fee-percent']);
   if (!(maxFeePercent >= 0 && maxFeePercent <= 100)) throw new UsageError('--max-fee-percent must be a number from 0 to 100');
@@ -619,11 +648,11 @@ async function main() {
   switch (v.help ? 'help' : cmd) {
     case 'setup': return setup();
     case 'selftest': return selftest(threads);
-    case 'pools': return poolsCmd();
-    case 'verify': return verifyCmd();
-    case 'note': return noteCmd(rest[0]);
-    case 'deposit': return deposit(rest[0], sig);
-    case 'sync': return syncCmd(rest[0]);
+    case 'pools': return poolsCmd(chain);
+    case 'verify': return verifyCmd(chain);
+    case 'note': return noteCmd(rest[0], chain);
+    case 'deposit': return deposit(rest[0], chain, sig);
+    case 'sync': return syncCmd(rest[0], chain);
     case 'status': return status(rest[0]);
     case 'withdraw':
       return withdraw(rest[0], rest[1], {

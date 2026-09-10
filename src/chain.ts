@@ -8,8 +8,8 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { bytesToNumberBE, numberToBytesBE } from '@noble/curves/utils.js';
 import { createContract, events } from 'micro-eth-signer/abi.js';
-import { RpcClient, withRetry } from 'micro-eth-signer/net.js';
-import { HOME, LOG_CHUNK, type Pool, rpcUrl, UsageError } from './config.ts';
+import { isTransientRpcError, RpcClient, withRetry } from 'micro-eth-signer/net.js';
+import { chainName, HOME, LOG_CHUNK, type Pool, UsageError } from './config.ts';
 import { decodeTree, encodeTree, extendTree, type Tree } from './crypto.ts';
 
 // ---------------------------------------------------------------------------
@@ -31,13 +31,18 @@ const RANGE_LIMIT =
 const NOT_IDEMPOTENT = new Set(['eth_sendTransaction']);
 const REQUEST_TIMEOUT_MS = 60_000;
 
+const urls = new WeakMap<RpcClient, string>();
+
+/** The endpoint behind a client, for messages. */
+export const urlOf = (net: RpcClient) => urls.get(net) ?? 'the RPC';
+
 /**
  * JSON-RPC over fetch -- RpcClient only needs `call`. Errors throw; they never
  * read as a value. Transient failures (429s, dropped connections, 5xx) are
  * retried with backoff, except eth_sendTransaction: a retry after the wallet
  * already sent would send a second transaction.
  */
-export function rpc(url: string = rpcUrl()): RpcClient {
+export function rpc(url: string): RpcClient {
   let id = 0;
   const once = async (method: string, params: unknown[]) => {
     let res: Response;
@@ -53,40 +58,52 @@ export function rpc(url: string = rpcUrl()): RpcClient {
       });
       text = await res.text();
     } catch (e) {
-      // isTransientRpcError does not count a request timeout, but it is as
-      // transient as a dropped connection -- say so in words it recognises.
-      if ((e as Error).name === 'TimeoutError') throw new Error(`${method}: ETIMEDOUT after ${REQUEST_TIMEOUT_MS / 1000}s`);
+      if ((e as Error).name === 'TimeoutError') {
+        const msg = `${method}: ETIMEDOUT after ${REQUEST_TIMEOUT_MS / 1000}s`;
+        // A log query that runs this long is too wide: split it, don't repeat it.
+        if (method === 'eth_getLogs') throw new RangeLimitError(msg);
+        // isTransientRpcError does not count a request timeout, but it is as
+        // transient as a dropped connection -- say so in words it recognises.
+        throw new Error(msg);
+      }
       throw e;
     }
+    // A provider that times out a log query ("Request timeout on the free
+    // plan", 408, 504) is saying the range is too heavy, not that it is down.
+    const tooWide = (s: string, status?: number) =>
+      RANGE_LIMIT.test(s) || (method === 'eth_getLogs' && (status === 408 || status === 504 || /time[sd]? ?out/i.test(s)));
     if (!res.ok) {
       // The canonical reason phrase, not res.statusText: HTTP/2 has none, and
       // the retry layer recognises 502/503/504 by these words.
       const msg = `${method}: HTTP ${res.status} ${STATUS_CODES[res.status] ?? ''} ${text.slice(0, 200)}`;
-      throw RANGE_LIMIT.test(text) ? new RangeLimitError(msg) : new Error(msg);
+      throw tooWide(text, res.status) ? new RangeLimitError(msg) : new Error(msg);
     }
     const body = JSON.parse(text) as { result?: unknown; error?: { message: string; code?: number; data?: unknown } };
     if (body.error) {
       const msg = `${method}: ${body.error.message}`;
-      if (RANGE_LIMIT.test(body.error.message)) throw new RangeLimitError(msg);
+      if (tooWide(body.error.message)) throw new RangeLimitError(msg);
       throw Object.assign(new Error(msg), body.error);
     }
     return body.result;
   };
-  return new RpcClient({
+  const client = new RpcClient({
     call: (method: string, ...params: unknown[]) =>
       NOT_IDEMPOTENT.has(method) ? once(method, params) : withRetry(() => once(method, params), undefined, method),
   });
+  urls.set(client, url);
+  return client;
 }
 
 /**
- * Refuse to touch pools through an RPC on another chain. The registry is
- * per-chain: on the wrong chain a pool address is empty, a deposit there is a
- * plain value transfer that succeeds, and the funds are gone.
+ * Refuse to act on a chain through an RPC on another. The same pool address
+ * can hold a different pool there, or nothing at all.
  */
 export async function assertChain(net: RpcClient, chainId: number): Promise<void> {
   const got = Number(await net.chainId());
   if (got !== chainId) {
-    throw new UsageError(`${rpcUrl()} is chain ${got}, but these pools are on chain ${chainId} -- wrong network?`);
+    throw new UsageError(
+      `${urlOf(net)} is on ${chainName(got)} (${got}), not ${chainName(chainId)} (${chainId}) -- use an RPC for ${chainName(chainId)}`,
+    );
   }
 }
 
@@ -177,6 +194,17 @@ export const bytes32 = (n: bigint): Uint8Array => numberToBytesBE(n, 32);
 const REORG_MARGIN = 12;
 const SYNC_CONCURRENCY = 4;
 
+/**
+ * eth_getLogs has no cursor, so sync pages by block range and sizes each page
+ * by what the last one returned: double below PAGE_SMALL logs; above
+ * PAGE_LARGE (~630 bytes each), shrink to what would have held PAGE_SMALL. Sparse L2 history (a few thousand deposits
+ * over 500M blocks) takes a handful of pages; busy Ethereum ranges stay at a
+ * few MB per response. Providers can fail silently on huge ones -- one
+ * returned an empty list for a 43 MB result.
+ */
+const PAGE_SMALL = 2000;
+const PAGE_LARGE = 8000;
+
 /** Keyed by chain and contract: a fork or testnet registry can reuse the same pool names. */
 const cacheBase = (pool: Pool) => join(HOME, 'cache', `${pool.chainId}-${pool.address.toLowerCase()}`);
 
@@ -253,13 +281,17 @@ export async function syncLeaves(net: RpcClient, pool: Pool, log: (s: string) =>
     return lines.length;
   };
 
+  // The page size: resized by PAGE_SMALL / PAGE_LARGE, and never above the
+  // ceiling -- half of the smallest range the provider refused as too wide.
+  let chunk = LOG_CHUNK;
+  let ceiling = Infinity;
+
   /** Scan from `start` toward the head until every leaf below `want` is held. */
   const scan = async (start: number) => {
     if (have >= want || start > head) return;
-    log(`syncing ${want - have} leaves from block ${start} (chunks of ${LOG_CHUNK}, ${SYNC_CONCURRENCY} at a time)`);
+    log(`syncing ${want - have} leaves from block ${start} (${SYNC_CONCURRENCY} ranges at a time)`);
     const pending: Range[] = [];
     let cursor = start;
-    let chunk = LOG_CHUNK;
     const nextRange = (): Range | undefined => {
       if (pending.length) return pending.shift();
       if (cursor > head) return undefined;
@@ -272,20 +304,40 @@ export async function syncLeaves(net: RpcClient, pool: Pool, log: (s: string) =>
     const finished = new Map<number, number>();
     let contiguous = start - 1;
     let failure: unknown;
-    const worker = async () => {
+    let failedRange: Range = [start, head];
+    // A provider still rate-limiting after withRetry's backoff gets half the
+    // workers; the sync gives up only when one worker is refused too.
+    let workers = SYNC_CONCURRENCY;
+    const worker = async (id: number) => {
       for (let r = nextRange(); r && failure === undefined && have < want; r = nextRange()) {
         try {
-          if (await fetchRange(r)) changed = true;
+          const n = await fetchRange(r);
+          if (n) changed = true;
+          // Judge the page that came back, not the newest size: with several
+          // in flight, stale small pages would otherwise keep doubling it.
+          const width = r[1] - r[0] + 1;
+          if (n < PAGE_SMALL && width >= chunk) chunk = Math.min(chunk * 2, ceiling);
+          else if (n > PAGE_LARGE) chunk = Math.min(chunk, Math.max(1, Math.floor((width * PAGE_SMALL) / n)));
         } catch (e) {
           if (e instanceof RangeLimitError && r[1] > r[0]) {
-            const size = Math.ceil((r[1] - r[0] + 1) / 4);
+            const width = r[1] - r[0] + 1;
+            const size = Math.ceil(width / 4);
             const parts: Range[] = [];
             for (let s = r[0]; s <= r[1]; s += size) parts.push([s, Math.min(s + size - 1, r[1])]);
             pending.unshift(...parts);
+            ceiling = Math.min(ceiling, Math.max(1, Math.floor(width / 2)));
             chunk = Math.min(chunk, size);
             continue;
           }
+          if (isTransientRpcError(e) && workers > 1) {
+            pending.unshift(r);
+            workers = Math.max(1, workers >> 1);
+            process.stderr.write(`\n  the RPC is rate-limiting; slowing to ${workers} request(s) at a time\n`);
+            if (id >= workers) return;
+            continue;
+          }
           failure = e;
+          failedRange = r;
           return;
         }
         finished.set(r[0], r[1]);
@@ -295,13 +347,20 @@ export async function syncLeaves(net: RpcClient, pool: Pool, log: (s: string) =>
           contiguous = end;
         }
         writeFileSync(markFile, String(Math.min(contiguous, head - REORG_MARGIN)));
-        process.stderr.write(`\r  block ${contiguous} / ${head}   leaves ${have} / ${want}   `);
+        process.stderr.write(`\r  block ${contiguous} / ${head}   leaves ${have} / ${want}   range ${chunk}      `);
+        if (id >= workers) return;
       }
     };
-    await Promise.all(Array.from({ length: SYNC_CONCURRENCY }, worker));
+    await Promise.all(Array.from({ length: SYNC_CONCURRENCY }, (_, id) => worker(id)));
     process.stderr.write('\n');
     if (failure !== undefined) {
-      throw new Error(`eth_getLogs failed -- this RPC may not serve archive logs: ${(failure as Error).message}`);
+      const why = isTransientRpcError(failure)
+        ? 'the RPC keeps refusing (rate limit or outage)'
+        : 'this RPC cannot serve these logs (no archive data, or a fault on its side)';
+      throw new Error(
+        `eth_getLogs for blocks ${failedRange[0]}-${failedRange[1]} failed -- ${why}: ${(failure as Error).message}\n` +
+          '  progress is saved; run it again, or continue with another RPC',
+      );
     }
   };
 
@@ -313,10 +372,12 @@ export async function syncLeaves(net: RpcClient, pool: Pool, log: (s: string) =>
     const tip = await net.height();
     if (await fetchRange([Math.max(pool.deployedBlock, tip - REORG_MARGIN), tip])) changed = true;
   }
-  // Still short, so the hole is below the mark: the leaf file was lost,
-  // truncated or edited. The chain is the source of truth -- start over.
-  if (have < want && mark >= pool.deployedBlock) {
-    log('the leaf cache has holes; rescanning from the deployment block');
+  // Still short: the leaf file was lost or edited, or the RPC returned an
+  // incomplete page (a flaky one does, now and then). The chain is the source
+  // of truth -- rescan everything once, with the page size starting over.
+  if (have < want) {
+    log('leaves are missing; rescanning from the deployment block');
+    chunk = LOG_CHUNK;
     await scan(pool.deployedBlock);
   }
 

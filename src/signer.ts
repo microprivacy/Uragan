@@ -20,7 +20,8 @@ import { ReadStream } from 'node:tty';
 import { addr, Transaction } from 'micro-eth-signer';
 import { privFromLegacyKeystore } from 'micro-eth-signer/keystore.js';
 import type { RpcClient } from 'micro-eth-signer/net.js';
-import { rpcUrl, UsageError } from './config.ts';
+import { urlOf } from './chain.ts';
+import { UsageError } from './config.ts';
 
 export type Call = { to: string; value?: bigint; data?: Uint8Array };
 
@@ -110,12 +111,12 @@ async function walletSigner(net: RpcClient, from?: string): Promise<Signer> {
   const picked = from ?? accounts[0];
   if (!picked) {
     throw new UsageError(
-      `no private key given, and ${rpcUrl()} has no accounts to sign with.\n` +
+      `no private key given, and ${urlOf(net)} has no accounts to sign with.\n` +
         '  pass --private-key / --account, or point --rpc-url at a wallet (Frame: http://127.0.0.1:1248)',
     );
   }
   if (from && accounts.length && !accounts.includes(from.toLowerCase())) {
-    throw new UsageError(`${rpcUrl()} does not hold ${from}; it has ${accounts.join(', ')}`);
+    throw new UsageError(`${urlOf(net)} does not hold ${from}; it has ${accounts.join(', ')}`);
   }
   const address = addr.addChecksum(picked);
   return {

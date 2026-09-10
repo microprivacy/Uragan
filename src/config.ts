@@ -11,8 +11,9 @@ export const ASSETS = process.env.URAGAN_ASSETS ?? join(ROOT, 'assets');
 export const HOME = process.env.URAGAN_HOME ?? join(homedir(), '.local/share/uragan');
 
 /**
- * Most public RPCs cap eth_getLogs at 10k blocks, so stay just under. Raise it
- * if your provider allows wider ranges -- it is the single biggest sync speedup.
+ * The first eth_getLogs block range. Sync pages through history with ranges it
+ * resizes by what comes back (see syncLeaves), so this only sets where it
+ * starts: just under the 10k-block cap most public RPCs have.
  */
 export const LOG_CHUNK = Number(process.env.URAGAN_CHUNK ?? 9500);
 
@@ -28,16 +29,46 @@ export const ARTIFACTS: Record<string, string> = {
   'tornado_no_zeros.params': 'ef0dbd36c0ad4e7f5e5cf0283f8cfba9eca8f9b6f67a8c786aafbc9665283050',
 };
 
+/**
+ * Supported chains, each with the public RPC used unless --rpc-url is given.
+ * Not the chains' own endpoints: those cap eth_getLogs at 10k blocks and
+ * rate-limit hard. These serve archive logs over wide ranges without a key.
+ */
+const CHAINS: Record<number, { name: string; rpc: string }> = {
+  1: { name: 'Ethereum', rpc: 'https://mainnet.gateway.tenderly.co' },
+  10: { name: 'Optimism', rpc: 'https://optimism.gateway.tenderly.co' },
+  42161: { name: 'Arbitrum', rpc: 'https://arbitrum.gateway.tenderly.co' },
+};
+
+export const chainName = (id: number) => CHAINS[id]?.name ?? `chain ${id}`;
+
+/** A --chain value: a name (ethereum, optimism, arbitrum) or a chain id. */
+export function parseChain(v: string): number {
+  if (/^\d+$/.test(v)) return Number(v);
+  const hit = Object.entries(CHAINS).find(([, c]) => c.name.toLowerCase() === v.toLowerCase());
+  if (!hit) {
+    const names = Object.values(CHAINS).map((c) => c.name.toLowerCase()).join(', ');
+    throw new UsageError(`unknown chain '${v}' -- ${names}, or a chain id`);
+  }
+  return Number(hit[0]);
+}
+
 let rpcOverride: string | undefined;
 
-/** --rpc-url, which takes precedence over ETH_RPC_URL. */
 export function setRpcUrl(url: string | undefined): void {
   rpcOverride = url;
 }
 
-export function rpcUrl(): string {
-  const url = rpcOverride ?? process.env.ETH_RPC_URL;
-  if (!url) throw new UsageError('no RPC: pass --rpc-url URL or set ETH_RPC_URL');
+export const customRpc = () => rpcOverride !== undefined;
+
+/** --rpc-url if given, else the chain's default. */
+export function rpcUrl(chain?: number): string {
+  if (rpcOverride !== undefined) return rpcOverride;
+  const url = chain === undefined ? undefined : CHAINS[chain]?.rpc;
+  if (!url) {
+    const known = Object.entries(CHAINS).map(([id, c]) => `${c.name} (${id})`).join(', ');
+    throw new UsageError(`no default RPC for chain ${chain} -- supported: ${known}, or pass --rpc-url`);
+  }
   return url;
 }
 
@@ -50,18 +81,35 @@ export type Pool = {
   deployedBlock: number;
   symbol: string;
   decimals: number;
-  /** null for native-ETH pools */
+  /** null for native-coin pools */
   tokenAddress: string | null;
 };
 
-/** Pool registry. URAGAN_INSTANCES points it at a fork, testnet, or new deployment. */
-export function pools(): Record<string, Pool> {
+/**
+ * Pool registry: chain id -> pool name -> pool. Names repeat across chains
+ * (eth-0.1 is on Ethereum, Optimism and Arbitrum), so the chain always comes
+ * from context -- --chain, --rpc-url's chain, or a note's netId.
+ * URAGAN_INSTANCES points it at a fork, testnet, or new deployment.
+ */
+function registry(): Record<string, Record<string, Omit<Pool, 'chainId'>>> {
   const file = process.env.URAGAN_INSTANCES ?? join(ROOT, 'src/instances.json');
   return JSON.parse(readFileSync(file, 'utf8'));
 }
 
-export function pool(key: string): Pool {
-  const p = pools()[key];
-  if (!p) throw new UsageError(`unknown pool '${key}' (see: uragan pools)`);
+/** Registry chains that work without --rpc-url. */
+export const defaultChains = (): number[] => Object.keys(registry()).map(Number).filter((id) => id in CHAINS);
+
+export function pools(chainId: number): Record<string, Pool> {
+  const chain = registry()[chainId];
+  if (!chain) {
+    const known = Object.keys(registry()).map((id) => `${chainName(Number(id))} (${id})`).join(', ');
+    throw new UsageError(`no pools on chain ${chainId} -- supported: ${known}`);
+  }
+  return Object.fromEntries(Object.entries(chain).map(([key, p]) => [key, { ...p, chainId }]));
+}
+
+export function pool(chainId: number, key: string): Pool {
+  const p = pools(chainId)[key];
+  if (!p) throw new UsageError(`no pool '${key}' on ${chainName(chainId)} (see: uragan pools)`);
   return p;
 }
