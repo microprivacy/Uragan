@@ -1,0 +1,230 @@
+--- a/Cargo.toml	2006-07-24 04:21:28.000000000 +0300
++++ b/Cargo.toml	2026-09-10 13:37:23.442307833 +0300
+@@ -49,6 +49,10 @@
+ [dependencies.num_cpus]
+ version = "1"
+ 
++[dependencies.rayon]
++version = "1"
++optional = true
++
+ [dependencies.pairing]
+ version = "0.21.*"
+ package = "pairing_ce"
+@@ -72,7 +76,7 @@
+ [features]
+ default = ["multicore"]
+ gm17 = []
+-multicore = ["crossbeam", "futures/thread-pool"]
++multicore = ["rayon"]
+ nightly = ["prefetch"]
+ nolog = []
+ sonic = ["tiny-keccak", "blake2-rfc"]
+--- a/src/multicore.rs	2020-06-17 22:09:10.000000000 +0300
++++ b/src/multicore.rs	2026-09-10 13:37:04.535185649 +0300
+@@ -1,82 +1,75 @@
+-//! This is an interface for dealing with the kinds of
+-//! parallel computations involved in bellman. It's
+-//! currently just a thin wrapper around CpuPool and
+-//! crossbeam but may be extended in the future to
+-//! allow for various parallelism strategies.
+-
+-extern crate num_cpus;
+-extern crate futures;
+-extern crate crossbeam;
++//! Multicore worker, backed by rayon.
++//!
++//! Patched for Uragan. Upstream used a futures ThreadPool for `compute`
++//! and crossbeam scoped threads for `scope`; both create OS threads with
++//! `std::thread::spawn`, which cannot exist on wasm32-unknown-unknown. rayon
++//! lets the embedder supply the threads (`ThreadPoolBuilder::spawn_handler`),
++//! so this same code runs natively -- rayon spawns OS threads -- and in wasm,
++//! where the host starts Node worker_threads over shared memory.
++//!
++//! Only scheduling changes. Every caller and all field/curve arithmetic are
++//! untouched: callers all use `scope.spawn(move |_| ...)` and ignore the
++//! returned handle, which a `rayon::Scope` satisfies as-is. Output does not
++//! depend on the thread count -- field arithmetic is exact -- so a proof for a
++//! fixed seed is byte-identical however many threads computed it.
++//!
++//! Callers must not `wait()` from inside a task (a blocked worker could starve
++//! the pool); bellman only waits on the thread that called `create_proof`.
+ 
+-use std::future::{Future};
++extern crate rayon;
++
++use std::future::Future;
++use std::pin::Pin;
+ use std::task::{Context, Poll};
+-use std::pin::{Pin};
+ 
+-use self::crossbeam::thread::{Scope};
++use futures::channel::oneshot::{channel, Receiver};
++use futures::executor::block_on;
+ 
+-use self::futures::future::{lazy};
+-use self::futures::channel::oneshot::{channel, Sender, Receiver};
+-use self::futures::executor::{block_on};
+-use self::futures::executor::{ThreadPool};
++pub use self::rayon::Scope;
+ 
+ #[derive(Clone)]
+ pub struct Worker {
+     cpus: usize,
+-    pool: ThreadPool
+ }
+ 
+-
+ impl Worker {
+     // We don't expose this outside the library so that
+     // all `Worker` instances have the same number of
+     // CPUs configured.
+-    
+     pub(crate) fn new_with_cpus(cpus: usize) -> Worker {
+-        Worker {
+-            cpus: cpus,
+-            pool: ThreadPool::builder().pool_size(cpus).create().expect("should create a thread pool for futures execution"),
+-        }
++        Worker { cpus }
+     }
+ 
++    /// Sized to the current rayon pool. In wasm the embedder must have built
++    /// the global pool first; rayon's default one would try to spawn OS threads.
+     pub fn new() -> Worker {
+-        Self::new_with_cpus(num_cpus::get())
++        Self::new_with_cpus(rayon::current_num_threads())
+     }
+ 
+     pub fn log_num_cpus(&self) -> u32 {
+         log2_floor(self.cpus)
+     }
+ 
+-    pub fn compute<F, T, E>(
+-        &self, f: F
+-    ) -> WorkerFuture<T, E>
+-        where F: FnOnce() -> Result<T, E> + Send + 'static,
+-              T: Send + 'static,
+-              E: Send + 'static
++    pub fn compute<F, T, E>(&self, f: F) -> WorkerFuture<T, E>
++    where
++        F: FnOnce() -> Result<T, E> + Send + 'static,
++        T: Send + 'static,
++        E: Send + 'static,
+     {
+         let (sender, receiver) = channel();
+-        let lazy_future = lazy(move |_| {
+-            let res = f(); 
+-
++        rayon::spawn(move || {
++            let res = f();
+             if !sender.is_canceled() {
+                 let _ = sender.send(res);
+             }
+         });
+-
+-        let worker_future = WorkerFuture {
+-            receiver
+-        };
+-
+-        self.pool.spawn_ok(lazy_future);
+-
+-        worker_future
++        WorkerFuture { receiver }
+     }
+ 
+-    pub fn scope<'a, F, R>(
+-        &self,
+-        elements: usize,
+-        f: F
+-    ) -> R
+-        where F: FnOnce(&Scope<'a>, usize) -> R
++    pub fn scope<'a, F, R>(&self, elements: usize, f: F) -> R
++    where
++        F: FnOnce(&Scope<'a>, usize) -> R + Send,
++        R: Send,
+     {
+         let chunk_size = if elements < self.cpus {
+             1
+@@ -84,33 +77,23 @@
+             elements / self.cpus
+         };
+ 
+-        crossbeam::scope(|scope| {
+-            f(scope, chunk_size)
+-        }).expect("must run")
++        rayon::scope(|scope| f(scope, chunk_size))
+     }
+ }
+ 
+ pub struct WorkerFuture<T, E> {
+-    receiver: Receiver<Result<T, E>>
++    receiver: Receiver<Result<T, E>>,
+ }
+ 
+ impl<T: Send + 'static, E: Send + 'static> Future for WorkerFuture<T, E> {
+     type Output = Result<T, E>;
+ 
+-    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output>
+-    {
++    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+         let rec = unsafe { self.map_unchecked_mut(|s| &mut s.receiver) };
+         match rec.poll(cx) {
+-            Poll::Ready(v) => {
+-                if let Ok(v) = v {
+-                    return Poll::Ready(v)
+-                } else {
+-                    panic!("Worker future can not have canceled sender");
+-                }
+-            },
+-            Poll::Pending => {
+-                return Poll::Pending;
+-            }
++            Poll::Ready(Ok(v)) => Poll::Ready(v),
++            Poll::Ready(Err(_)) => panic!("Worker future can not have canceled sender"),
++            Poll::Pending => Poll::Pending,
+         }
+     }
+ }
+@@ -126,7 +109,7 @@
+ 
+     let mut pow = 0;
+ 
+-    while (1 << (pow+1)) <= num {
++    while (1 << (pow + 1)) <= num {
+         pow += 1;
+     }
+ 
+@@ -144,33 +127,3 @@
+     assert_eq!(log2_floor(7), 2);
+     assert_eq!(log2_floor(8), 3);
+ }
+-
+-#[test]
+-fn test_trivial_spawning() {
+-    use self::futures::executor::block_on;
+-
+-    fn long_fn() -> Result<usize, ()> {
+-        let mut i: usize = 1;
+-        println!("Start calculating long task");
+-        for _ in 0..1000000 {
+-            i = i.wrapping_mul(42);
+-        }
+-
+-        println!("Done calculating long task");
+-
+-        Ok(i)
+-    }
+-
+-    let worker = Worker::new();
+-    println!("Spawning");
+-    let fut = worker.compute(|| long_fn());
+-    println!("Done spawning");
+-
+-    println!("Will sleep now");
+-
+-    std::thread::sleep(std::time::Duration::from_millis(10000));
+-
+-    println!("Done sleeping");
+-
+-    let _ = block_on(fut);
+-}

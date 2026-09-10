@@ -1,0 +1,11 @@
+--- a/src/util/osstringext.rs	2020-03-29 22:59:58.000000000 +0300
++++ b/src/util/osstringext.rs	2026-09-10 13:18:51.502907420 +0300
+@@ -20,7 +20,7 @@
+     fn split(&self, b: u8) -> OsSplit;
+ }
+ 
+-#[cfg(target_os = "windows")]
++#[cfg(any(target_os = "windows", target_arch = "wasm32"))]
+ impl OsStrExt3 for OsStr {
+     #[allow(clippy::transmute_ptr_to_ptr)]
+     fn from_bytes(b: &[u8]) -> &Self {
