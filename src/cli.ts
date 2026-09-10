@@ -579,7 +579,7 @@ signing (deposit, withdraw --self) -- a local key, or else the wallet at --rpc-u
   (no key)                     eth_sendTransaction to --rpc-url; the wallet signs.
                                --from ADDR picks the account (Frame: http://127.0.0.1:1248)
 
-env: ETH_RPC_URL, URAGAN_HOME, URAGAN_CHUNK, URAGAN_INSTANCES
+env: ETH_RPC_URL, URAGAN_HOME, URAGAN_CHUNK, URAGAN_INSTANCES, URAGAN_ASSETS
 Pass \`-\` for a note to read it from stdin, keeping it out of argv and shell history.`;
 
 const OPTIONS = {
