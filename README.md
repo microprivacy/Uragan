@@ -19,7 +19,7 @@ Requires Node ≥ 22.18.
 ```sh
 pnpm install
 ln -s $PWD/src/cli.ts ~/.local/bin/uragan
-uragan setup   # download and verify circuit + keys, run selftest
+uragan setup   # download circuit + keys, check their pinned sha256
 ```
 
 ## Usage
