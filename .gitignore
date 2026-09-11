@@ -7,3 +7,6 @@ notes/
 
 # npm
 node_modules/
+
+# build output
+dist/
