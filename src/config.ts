@@ -18,15 +18,17 @@ export const HOME = process.env.URAGAN_HOME ?? join(homedir(), '.local/share/ura
 export const LOG_CHUNK = Number(process.env.URAGAN_CHUNK ?? 9500)
 
 /**
- * Circuit and proving key from tornado-core's v2.1 release, pinned by sha256.
- * These exact bytes reproduce the verifying key deployed at
- * 0xce172ce1F20EC0B3728c9965470eaf994A03557A; setup refuses anything else.
+ * Circuit and keys from tornado-core's v2.1 release, pinned by sha256; setup
+ * refuses anything else. Every constant of the verifying key is in the
+ * bytecode of the verifier deployed at
+ * 0xce172ce1F20EC0B3728c9965470eaf994A03557A, and the proving key makes
+ * proofs it accepts (test/prover.test.ts).
  */
 export const RELEASE = 'https://github.com/tornadocash/tornado-core/releases/download/v2.1'
 export const ARTIFACTS: Record<string, string> = {
   'withdraw.json': '3ddd61dbff09caeec82d8edde95c674a3c34f9e66b1fe9f2c8783e72fe536f98',
   'withdraw_verification_key.json': '3eedcf6ec6b5c24219ed19c7a33966fbfa6a03ae7c84124270589091e87cf8d3',
-  'tornado_no_zeros.params': 'ef0dbd36c0ad4e7f5e5cf0283f8cfba9eca8f9b6f67a8c786aafbc9665283050',
+  'withdraw_proving_key.json': '9b1b2e7aed08ab0cc0c511710331ba2941e03162800e59e39dc65cb5f6f79daf',
 }
 
 /**

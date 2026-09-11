@@ -3,8 +3,8 @@
  * uragan -- a Tornado Cash client.
  *
  * TypeScript run directly by Node (types are stripped at load). Chain access
- * and signing via micro-eth-signer, zk primitives and witnesses via
- * micro-zk-proofs, Groth16 proving via the wasm build in prover/.
+ * and signing via micro-eth-signer; zk primitives, witnesses and Groth16
+ * proofs via micro-zk-proofs.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { availableParallelism } from 'node:os'

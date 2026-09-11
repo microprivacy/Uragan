@@ -1,4 +1,4 @@
-# Circuit + keys, fetched and sha256-checked by `setup` (~29 MB)
+# Circuit + keys, fetched and sha256-checked by `setup` (~52 MB)
 assets/
 
 # Never commit notes -- a note IS the money
@@ -7,7 +7,3 @@ notes/
 
 # npm
 node_modules/
-
-# prover build
-prover/vendor/
-prover/target/

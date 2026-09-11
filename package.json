@@ -7,7 +7,7 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "@noble/curves": "^2.4.0",
+    "@noble/curves": "~2.2.0",
     "@noble/hashes": "^2.4.0",
     "micro-eth-signer": "^0.20.1",
     "micro-zk-proofs": "^0.3.1"
@@ -15,12 +15,11 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build:prover": "prover/build.sh",
     "lint": "biome check",
     "format": "biome check --write",
     "test": "node --test test/*.test.ts"
   },
-  "description": "Tornado Cash client: TypeScript on Node, noble cryptography, a wasm Groth16 prover",
+  "description": "Tornado Cash client: TypeScript on Node and noble cryptography",
   "bin": {
     "uragan": "./src/cli.ts"
   },

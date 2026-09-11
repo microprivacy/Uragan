@@ -7,7 +7,7 @@ Lightweight and modern CLI for Tornado Cash.
 - Ethereum, Optimism and Arbitrum: all 27 pools
 - Withdraw via relayer or yourself
 - Sign with a private key, keystore or wallet RPC
-- Local multithreaded WASM prover (~3 s)
+- Local multithreaded prover in pure JS (~10 s)
 - Proofs checked on-chain before sending
 - Resumable, reorg-safe sync
 - 3 dependencies, no build step
