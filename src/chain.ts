@@ -41,9 +41,11 @@ export const urlOf = (net: RpcClient) => urls.get(net) ?? 'the RPC'
  * JSON-RPC over fetch -- RpcClient only needs `call`. Errors throw; they never
  * read as a value. Transient failures (429s, dropped connections, 5xx) are
  * retried with backoff, except eth_sendTransaction: a retry after the wallet
- * already sent would send a second transaction.
+ * already sent would send a second transaction. `retry: false` is for a local
+ * wallet, where a refused connection means it is not running and backing off
+ * would only delay saying so.
  */
-export function rpc(url: string): RpcClient {
+export function rpc(url: string, { retry = true } = {}): RpcClient {
   let id = 0
   const once = async (method: string, params: unknown[]) => {
     let res: Response
@@ -90,7 +92,9 @@ export function rpc(url: string): RpcClient {
   }
   const client = new RpcClient({
     call: (method: string, ...params: unknown[]) =>
-      NOT_IDEMPOTENT.has(method) ? once(method, params) : withRetry(() => once(method, params), undefined, method),
+      !retry || NOT_IDEMPOTENT.has(method)
+        ? once(method, params)
+        : withRetry(() => once(method, params), undefined, method),
   })
   urls.set(client, url)
   return client

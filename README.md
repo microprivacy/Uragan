@@ -6,7 +6,7 @@ Lightweight and modern CLI for Tornado Cash.
 
 - Ethereum, Optimism and Arbitrum: all 27 pools
 - Withdraw via relayer or yourself
-- Sign with a private key, keystore or wallet RPC
+- Sign with Frame, a private key, a keystore or any wallet RPC
 - Local multithreaded prover in pure JS (~10 s)
 - Proofs checked on-chain before sending
 - Resumable, reorg-safe sync
@@ -31,7 +31,7 @@ uragan status - < note.txt
 uragan withdraw - 0xRecipient --relayer https://relayer.example < note.txt
 ```
 
-Public RPCs are used by default; pass `--rpc-url` for your own node, or a wallet like Frame to sign.
+Public RPCs are used by default, and Frame signs unless you pass a key. `--rpc-url` swaps in your own node, or a wallet that then also signs.
 Back up every note: it is the only way to withdraw. Run `uragan help` for all commands and options.
 
 ## License

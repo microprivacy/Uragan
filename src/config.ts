@@ -44,6 +44,9 @@ const CHAINS: Record<number, { name: string; rpc: string }> = {
 
 export const chainName = (id: number) => CHAINS[id]?.name ?? `chain ${id}`
 
+/** Frame's local JSON-RPC: the signer when neither a key nor --rpc-url is given. */
+export const FRAME_RPC = 'http://127.0.0.1:1248'
+
 /** A --chain value: a name (ethereum, optimism, arbitrum) or a chain id. */
 export function parseChain(v: string): number {
   if (/^\d+$/.test(v)) return Number(v)

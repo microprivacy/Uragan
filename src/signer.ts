@@ -1,6 +1,6 @@
 /**
- * Transaction signing, the way `cast send` does it: either a local key, or the
- * wallet behind the RPC URL.
+ * Transaction signing, the way `cast send` does it: either a local key, or a
+ * wallet over JSON-RPC.
  *
  * Local key -- sign here and broadcast raw:
  *   --private-key PK             visible in /proc/<pid>/cmdline while running
@@ -9,9 +9,10 @@
  *   --account NAME | --keystore  Web3 Secret Storage (V3) keystore -- the format
  *                                `cast wallet import` writes to ~/.foundry/keystores
  *
- * No key -- send eth_sendTransaction to --rpc-url and let the wallet sign
- * (Frame, a hardware-wallet bridge, anvil). --from picks the account; by
- * default it is the wallet's first.
+ * No key -- send eth_sendTransaction and let a wallet sign: the one at
+ * --rpc-url (Frame, a hardware-wallet bridge, anvil), else Frame on its local
+ * port, with reads and the wait for the receipt left on the public RPC.
+ * --from picks the account; by default it is the wallet's first.
  */
 import { openSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -21,8 +22,8 @@ import { bytesToHex } from '@noble/hashes/utils.js'
 import { addr, Transaction } from 'micro-eth-signer'
 import { privFromLegacyKeystore } from 'micro-eth-signer/keystore.js'
 import type { RpcClient } from 'micro-eth-signer/net.js'
-import { urlOf } from './chain.ts'
-import { customRpc, UsageError } from './config.ts'
+import { rpc, urlOf } from './chain.ts'
+import { chainName, customRpc, FRAME_RPC, UsageError } from './config.ts'
 
 export type Call = { to: string; value?: bigint; data?: Uint8Array }
 
@@ -37,10 +38,11 @@ export type SignerOpts = { privateKey?: string; account?: string; keystore?: str
 const hexData = (d?: Uint8Array) => (d ? `0x${bytesToHex(d)}` : '0x')
 
 /**
- * Resolve the signer up front -- including the wallet's account -- so a
- * misconfiguration fails before anything is created or sent.
+ * Resolve the signer up front -- including the wallet's account and chain --
+ * so a misconfiguration fails before anything is created or sent. `net` is
+ * the command's RPC, on `chainId`.
  */
-export async function makeSigner(net: RpcClient, o: SignerOpts): Promise<Signer> {
+export async function makeSigner(net: RpcClient, chainId: number, o: SignerOpts): Promise<Signer> {
   const pk = o.privateKey ?? process.env.URAGAN_PRIVATE_KEY
   if (pk) return localSigner(net, pk.startsWith('0x') ? pk : `0x${pk}`)
   if (o.account || o.keystore) {
@@ -54,7 +56,7 @@ export async function makeSigner(net: RpcClient, o: SignerOpts): Promise<Signer>
       throw new UsageError(`cannot decrypt ${file}: ${(e as Error).message}`)
     }
   }
-  return walletSigner(net, o.from)
+  return walletSigner(customRpc() ? net : rpc(FRAME_RPC, { retry: false }), net, chainId, o.from)
 }
 
 /** Long enough for a congested block or two; past this the tx was likely dropped or replaced. */
@@ -99,35 +101,57 @@ function localSigner(net: RpcClient, privateKey: string | Uint8Array): Signer {
   }
 }
 
-async function walletSigner(net: RpcClient, from?: string): Promise<Signer> {
+/** Sign with `wallet`; wait for receipts on `net`. The two are one client when --rpc-url is the wallet. */
+async function walletSigner(wallet: RpcClient, net: RpcClient, chainId: number, from?: string): Promise<Signer> {
+  // The same pool address can hold a different pool on another chain, or
+  // nothing at all. The wallet's chain is its user's to switch -- even while
+  // a withdrawal syncs and proves -- so it is checked here and again just
+  // before sending, and the transaction names its chain for wallets that
+  // refuse a mismatch themselves.
+  const onChain = async () => {
+    const got = Number(await wallet.chainId())
+    if (got !== chainId) {
+      throw new UsageError(
+        `the wallet at ${urlOf(wallet)} is on ${chainName(got)} (${got}), not ${chainName(chainId)} (${chainId}) -- switch it`,
+      )
+    }
+  }
+  try {
+    await onChain()
+  } catch (e) {
+    if (e instanceof UsageError) throw e
+    const why = (e as { cause?: { code?: string } }).cause?.code ?? (e as Error).message
+    throw new UsageError(
+      `no key given, and no wallet answers at ${urlOf(wallet)} (${why}).\n` +
+        '  start Frame, point --rpc-url at another wallet, or pass --private-key / --account / --keystore',
+    )
+  }
   let accounts: string[] = []
   try {
-    accounts = ((await net.call('eth_accounts')) as string[]).map((a) => a.toLowerCase())
+    accounts = ((await wallet.call('eth_accounts')) as string[]).map((a) => a.toLowerCase())
   } catch {
     // a plain node may not implement eth_accounts at all
   }
   const picked = from ?? accounts[0]
-  // A wallet at --rpc-url may list no accounts until it prompts, so --from is
-  // trusted there. The public default RPCs never hold one.
-  if (!picked || (!accounts.length && !customRpc())) {
-    throw new UsageError(
-      `no private key given, and ${urlOf(net)} has no accounts to sign with.\n` +
-        '  pass --private-key / --account, or point --rpc-url at a wallet (Frame: http://127.0.0.1:1248)',
-    )
+  // A wallet may list no accounts until it prompts, so --from is trusted.
+  if (!picked) {
+    throw new UsageError(`no key given, and ${urlOf(wallet)} lists no accounts to sign with -- pass --from, or a key`)
   }
   if (from && accounts.length && !accounts.includes(from.toLowerCase())) {
-    throw new UsageError(`${urlOf(net)} does not hold ${from}; it has ${accounts.join(', ')}`)
+    throw new UsageError(`${urlOf(wallet)} does not hold ${from}; it has ${accounts.join(', ')}`)
   }
   const address = addr.addChecksum(picked)
   return {
     address,
     async send({ to, value = 0n, data }) {
+      await onChain()
       // The wallet fills in nonce, gas and fees, and asks its user to approve.
-      const hash = (await net.call('eth_sendTransaction', {
+      const hash = (await wallet.call('eth_sendTransaction', {
         from: address,
         to,
         value: `0x${value.toString(16)}`,
         data: hexData(data),
+        chainId: `0x${chainId.toString(16)}`,
       })) as string
       return confirm(net, hash)
     },

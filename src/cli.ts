@@ -34,6 +34,7 @@ import {
   chainName,
   customRpc,
   defaultChains,
+  FRAME_RPC,
   HOME,
   type Pool,
   parseChain,
@@ -237,7 +238,7 @@ async function deposit(key: string | undefined, chain: number | undefined, sig: 
   if (!key) throw new UsageError('usage: uragan deposit <pool>')
   const { net, p } = await connectPool(key, chain)
   await assertPool(net, p, key)
-  const signer = await makeSigner(net, sig)
+  const signer = await makeSigner(net, p.chainId, sig)
   const amount = parseUnits(p.amount, p.decimals)
 
   if (p.tokenAddress) {
@@ -469,7 +470,7 @@ async function withdraw(noteArg: string | undefined, recipientArg: string | unde
   const { net } = await connect(p.chainId)
   // Resolve a --self signer before syncing and proving, so a misconfigured
   // wallet or key fails in a second rather than after all that work.
-  const signer = o.self && !o.dryRun ? await makeSigner(net, o) : undefined
+  const signer = o.self && !o.dryRun ? await makeSigner(net, p.chainId, o) : undefined
 
   const [spent, deposited] = await Promise.all([
     read(net, p.address, TORNADO.isSpent, bytes32(n.nullifierHash)),
@@ -632,17 +633,17 @@ const HELP = `uragan -- Tornado Cash from the command line
   --chain NAME                 the chain a <pool> is on: ethereum (default), optimism, arbitrum.
                                Notes carry their own chain
   --rpc-url URL                your own RPC instead of the public default -- a node, or a
-                               wallet like Frame to sign. Without --chain, its chain is used
+                               wallet, which then also signs. Without --chain, its chain is used
   --max-fee-percent N          refuse a relayer-computed fee above N% of the amount (default 5)
   --threads N                  prover threads (default: all cores)
 
-signing (deposit, withdraw --self) -- a local key, or else the wallet at --rpc-url:
+signing (deposit, withdraw --self) -- a local key, or else a wallet:
   --private-key PK             sign locally (visible in ps while running; prefer the env var)
   URAGAN_PRIVATE_KEY           the same, from the environment
   --account NAME               cast keystore (~/.foundry/keystores/NAME)
   --keystore FILE              any V3 keystore; password from URAGAN_KEYSTORE_PASSWORD or a prompt
-  (no key)                     eth_sendTransaction to --rpc-url; the wallet signs.
-                               --from ADDR picks the account (Frame: http://127.0.0.1:1248)
+  (no key)                     a wallet signs: the one at --rpc-url, else Frame at
+                               ${FRAME_RPC}. --from ADDR picks the account
 
 env: URAGAN_HOME, URAGAN_CHUNK, URAGAN_INSTANCES, URAGAN_ASSETS
 Pass \`-\` for a note to read it from stdin, keeping it out of argv and shell history.`
