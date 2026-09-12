@@ -1,0 +1,120 @@
+{
+  "1": {
+    "0xgm777.eth": {
+      "rewardAccount": "0x94596B6A626392F5D972D6CC4D929a42c2f0008c",
+      "url": "https://gm777.xyz"
+    },
+    "0xgn777.eth": {
+      "rewardAccount": "0x0381DeeE9BBCD701D022b47c81F5b0079F48d38C",
+      "url": "https://gn777.xyz"
+    },
+    "aarelayer.eth": {
+      "rewardAccount": "0x69cE09aB548FFB0b46978FdABB44BEB2344608d5",
+      "url": "https://fakkk.vin"
+    },
+    "bitah.eth": {
+      "rewardAccount": "0x7E3893725d4e238B4c8c83375bBAd024a66Ffa42",
+      "url": "https://tornado.bitah.link"
+    },
+    "cheap-relayer.eth": {
+      "rewardAccount": "0x076D4E32C6A5D888fC4658281539c94E778C796d",
+      "url": "https://mainnet-tornado.cheap-relayer.xyz"
+    },
+    "default-relayer.eth": {
+      "rewardAccount": "0x5555555731006f71f121144534Ca7C8799F66AA3",
+      "url": "https://eth.default-relayer.com"
+    },
+    "dieguis-and-martis.eth": {
+      "rewardAccount": "0x9EDde74078Fba110c22922a925f653BCF1F60121",
+      "url": "https://mainnet.dieguis-and-martis.xyz"
+    },
+    "hello-relayer.eth": {
+      "rewardAccount": "0x213Cfeb89529efC2eAE2a502D4a8253Fe4Ae76eF",
+      "url": "https://hirelay04.xyz"
+    },
+    "hurricane-relayer.eth": {
+      "rewardAccount": "0x16CB924b5b7ef604139bE95F8762ed817852Db92",
+      "url": "https://eth.hurricane42.xyz"
+    },
+    "k-relayer.eth": {
+      "rewardAccount": "0xC49415493eB3Ec64a0F13D8AA5056f1CfC4ce35c",
+      "url": "https://black-hardy.com"
+    },
+    "lowcost.eth": {
+      "rewardAccount": "0x28907F21F43B419F34226d6f10aCbCf1832b1D4d",
+      "url": "https://mainnet-tornado.low-fee.xyz"
+    },
+    "master-relayer.eth": {
+      "rewardAccount": "0xAAAAA27EA9ffab81F4735e6B766af985d0c88C61",
+      "url": "https://eth.master-relayer.com"
+    },
+    "s-relayer.eth": {
+      "rewardAccount": "0xc6398b4e8B60720051ed33f5C5a692f9785f5580",
+      "url": "https://s-relayer.xyz"
+    },
+    "safe-torn.eth": {
+      "rewardAccount": "0x0A5B2bF3cCfB44C1D22F07Eed9553eCba752D4aD",
+      "url": "https://eth3.safetorn.ovh"
+    },
+    "sky-relayer.eth": {
+      "rewardAccount": "0xEE4C45Cc5eAa535CB8a8ffdc92f2839A601fe226",
+      "url": "https://sky-relayer.xyz"
+    },
+    "solid-relayer.eth": {
+      "rewardAccount": "0xb69e1e65142d293035323470d2B3c0c5d4E03F8e",
+      "url": "https://solidrelayer.com"
+    },
+    "t-relayer.eth": {
+      "rewardAccount": "0x000000Cd6521Ed1a65FAe0678eA15aF4EEAD74fe",
+      "url": "https://eth.t-relayer.com"
+    },
+    "tor-relay.eth": {
+      "rewardAccount": "0x7d2A66f05d2BB0ff4DC856Eb317196C59Ac3e932",
+      "url": "https://tor.fakkk.vin"
+    },
+    "torn-city.eth": {
+      "rewardAccount": "0xd04e9f0945DEA8373D882C730e2c93a74B591796",
+      "url": "https://torncity.fun"
+    },
+    "torntool.eth": {
+      "rewardAccount": "0xC0F12799B8D3FA8810DfE1616095170C72117F8F",
+      "url": "https://eth.theavengers.me"
+    },
+    "trndrly.eth": {
+      "rewardAccount": "0xf0bf3C1D67afA6c48b9B5d1BC7E3F0B87F2B80Dd",
+      "url": "https://mainnet.trndrly.xyz"
+    }
+  },
+  "10": {
+    "dieguis-and-martis.eth": {
+      "rewardAccount": "0x9EDde74078Fba110c22922a925f653BCF1F60121",
+      "url": "https://op.dieguis-and-martis.xyz"
+    },
+    "torntool.eth": {
+      "rewardAccount": "0xC0F12799B8D3FA8810DfE1616095170C72117F8F",
+      "url": "https://op.theavengers.me"
+    }
+  },
+  "42161": {
+    "dieguis-and-martis.eth": {
+      "rewardAccount": "0x9EDde74078Fba110c22922a925f653BCF1F60121",
+      "url": "https://arb.dieguis-and-martis.xyz"
+    },
+    "hurricane-relayer.eth": {
+      "rewardAccount": "0x16CB924b5b7ef604139bE95F8762ed817852Db92",
+      "url": "https://arbitrum.hurricane42.xyz"
+    },
+    "safe-torn.eth": {
+      "rewardAccount": "0x0A5B2bF3cCfB44C1D22F07Eed9553eCba752D4aD",
+      "url": "https://arb3.safetorn.ovh"
+    },
+    "torn-city.eth": {
+      "rewardAccount": "0xd04e9f0945DEA8373D882C730e2c93a74B591796",
+      "url": "https://arb.torncity.fun"
+    },
+    "torntool.eth": {
+      "rewardAccount": "0xC0F12799B8D3FA8810DfE1616095170C72117F8F",
+      "url": "https://arb.theavengers.me"
+    }
+  }
+}

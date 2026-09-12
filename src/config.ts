@@ -127,3 +127,26 @@ export function pool(chainId: number, key: string): Pool {
   if (!p) throw new UsageError(`no pool '${key}' on ${chainName(chainId)} (see: uragan pools)`)
   return p
 }
+
+export type Relayer = {
+  /** the relayer's ENS name in the registry */
+  name: string
+  url: string
+  /** the address it registered; a relayer reporting another is skipped */
+  rewardAccount: string
+}
+
+/**
+ * Default relayers: chain id -> ENS name -> relayer. From the Tornado relayer
+ * registry (0x58E8dCC13BE9780fC42E8723D8EaD4CF46943dF2 on Ethereum) and each
+ * name's <chain>-tornado url record, as of September 2026: staked, answering,
+ * and paying fees to the address they registered. Relayers come and go, so a
+ * withdrawal re-checks every one before picking.
+ */
+export function defaultRelayers(chainId: number): Relayer[] {
+  const all = JSON.parse(readFileSync(join(ROOT, 'src/relayers.json'), 'utf8'))
+  return Object.entries((all[chainId] ?? {}) as Record<string, Omit<Relayer, 'name'>>).map(([name, r]) => ({
+    name,
+    ...r,
+  }))
+}

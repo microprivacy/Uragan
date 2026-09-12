@@ -34,6 +34,7 @@ import {
   chainName,
   customRpc,
   defaultChains,
+  defaultRelayers,
   FRAME_RPC,
   HOME,
   type Pool,
@@ -41,6 +42,7 @@ import {
   pool,
   pools,
   RELEASE,
+  type Relayer,
   rpcUrl,
   setRpcUrl,
   UsageError,
@@ -340,6 +342,40 @@ async function relayerStatus(url: string): Promise<RelayerStatus> {
   return (await res.json()) as RelayerStatus
 }
 
+/**
+ * The cheapest default relayer for a chain that answers, serves that chain,
+ * reports itself healthy, and pays fees to the account it registered. A
+ * random one among equals, so withdrawals do not all land on one relayer.
+ */
+async function pickRelayer(chainId: number): Promise<Relayer & { st: RelayerStatus }> {
+  const all = defaultRelayers(chainId)
+  if (!all.length)
+    throw new UsageError(`no default relayers for ${chainName(chainId)} -- pass --relayer URL, or --self`)
+  const usable = (
+    await Promise.all(
+      all.map(async (r) => {
+        const st = await relayerStatus(r.url).catch(() => undefined)
+        const cut = Number(st?.tornadoServiceFee)
+        const ok =
+          st &&
+          Number(st.netId) === chainId &&
+          String(st.health?.status) === 'true' &&
+          st.rewardAccount?.toLowerCase() === r.rewardAccount.toLowerCase() &&
+          Number.isFinite(cut)
+        return ok ? { ...r, st, cut } : undefined
+      }),
+    )
+  ).filter((r) => r !== undefined)
+  if (!usable.length) {
+    throw new UsageError(
+      `none of the ${all.length} default relayers for ${chainName(chainId)} is usable right now -- pass --relayer URL, or --self`,
+    )
+  }
+  const min = Math.min(...usable.map((r) => r.cut))
+  const cheapest = usable.filter((r) => r.cut === min)
+  return cheapest[Math.floor(Math.random() * cheapest.length)]!
+}
+
 /** tornado-cli's fee formula: 500k gas at the current price, plus the relayer's cut of the amount. */
 function relayerFee(p: Pool, st: RelayerStatus, gasPrice: bigint, refund: bigint): bigint {
   const amount = parseUnits(p.amount, p.decimals)
@@ -449,17 +485,12 @@ type WithdrawOpts = SignerOpts & {
 }
 
 async function withdraw(noteArg: string | undefined, recipientArg: string | undefined, o: WithdrawOpts) {
-  if (!recipientArg) throw new UsageError('usage: uragan withdraw <note|-> <recipient> (--relayer URL | --self)')
-  if (!o.relayer && !o.self) {
-    throw new UsageError(
-      'choose how to submit: --relayer URL (recommended), or --self, which pays gas from your own key and links it to this withdrawal',
-    )
-  }
+  if (!recipientArg) throw new UsageError('usage: uragan withdraw <note|-> <recipient> [--relayer URL | --self]')
   if (o.relayer && o.self) throw new UsageError('--relayer and --self are exclusive')
   const explicitFee = baseUnits('fee', o.fee)
   const refund = baseUnits('refund', o.refund) ?? 0n
-  if (explicitFee !== undefined && !o.relayer)
-    throw new UsageError('--fee only applies with --relayer; with --self there is no one to pay')
+  if (explicitFee !== undefined && o.self)
+    throw new UsageError('--fee only applies with a relayer; with --self there is no one to pay')
 
   const n = parseNote(await readNote(noteArg))
   const recipient = checksummed(recipientArg)
@@ -481,11 +512,21 @@ async function withdraw(noteArg: string | undefined, recipientArg: string | unde
 
   let relayer = ADDRESS_ZERO
   let fee = 0n
-  if (o.relayer) {
-    const st = await relayerStatus(o.relayer)
+  let relayerUrl: string | undefined
+  if (!o.self) {
+    let st: RelayerStatus
+    if (o.relayer) {
+      relayerUrl = o.relayer
+      st = await relayerStatus(o.relayer)
+    } else {
+      const picked = await pickRelayer(p.chainId)
+      relayerUrl = picked.url
+      st = picked.st
+      log(`picked ${picked.name} (${picked.url}), the cheapest default relayer answering`)
+    }
     if (st.netId !== undefined && Number(st.netId) !== p.chainId) {
       throw new UsageError(
-        `relayer ${o.relayer} serves ${chainName(Number(st.netId))} (${st.netId}), but this note is for ${chainName(p.chainId)} (${p.chainId})`,
+        `relayer ${relayerUrl} serves ${chainName(Number(st.netId))} (${st.netId}), but this note is for ${chainName(p.chainId)} (${p.chainId})`,
       )
     }
     relayer = checksummed(st.rewardAccount)
@@ -581,11 +622,11 @@ async function withdraw(noteArg: string | undefined, recipientArg: string | unde
     return
   }
 
-  if (o.relayer) {
+  if (relayerUrl) {
     const hash = await submitViaRelayer(
       net,
       p,
-      o.relayer,
+      relayerUrl,
       {
         contract: p.address,
         proof: proof.proof,
@@ -601,19 +642,25 @@ async function withdraw(noteArg: string | undefined, recipientArg: string | unde
   log(`withdrawn: ${await signer!.send({ to: p.address, value: refund, data: calldata })}`)
 }
 
-async function relayers(urls: string[]) {
-  if (!urls.length) throw new UsageError('usage: uragan relayers <url>...')
-  out(`${'RELAYER'.padEnd(38)} ${'FEE%'.padEnd(6)} ${'CHAIN'.padEnd(6)} ${'UP'.padEnd(4)} REWARD ACCOUNT`)
-  for (const u of urls) {
-    try {
-      const s = await relayerStatus(u)
-      const up = String(s.health?.status) === 'true' ? 'yes' : 'no'
-      out(
-        `${u.padEnd(38)} ${String(s.tornadoServiceFee ?? '?').padEnd(6)} ${String(s.netId ?? '?').padEnd(6)} ${up.padEnd(4)} ${s.rewardAccount}`,
-      )
-    } catch (e) {
-      out(`${u.padEnd(38)} unreachable (${(e as Error).message})`)
+/** The /status of the relayers given, else of the default relayers on --chain, or on every chain. */
+async function relayers(urls: string[], chain?: number) {
+  const list = urls.length
+    ? urls
+    : (chain === undefined ? defaultChains() : [chain]).flatMap((id) => defaultRelayers(id).map((r) => r.url))
+  if (!list.length) throw new UsageError(`no default relayers for ${chainName(chain!)} -- pass their URLs`)
+  const statuses = await Promise.allSettled(list.map(relayerStatus))
+  out(`${'RELAYER'.padEnd(42)} ${'FEE%'.padEnd(6)} ${'CHAIN'.padEnd(6)} ${'UP'.padEnd(4)} REWARD ACCOUNT`)
+  for (const [i, u] of list.entries()) {
+    const r = statuses[i]!
+    if (r.status === 'rejected') {
+      out(`${u.padEnd(42)} unreachable (${(r.reason as Error).message})`)
+      continue
     }
+    const s = r.value
+    const up = String(s.health?.status) === 'true' ? 'yes' : 'no'
+    out(
+      `${u.padEnd(42)} ${String(s.tornadoServiceFee ?? '?').padEnd(6)} ${String(s.netId ?? '?').padEnd(6)} ${up.padEnd(4)} ${s.rewardAccount}`,
+    )
   }
 }
 
@@ -627,8 +674,9 @@ const HELP = `uragan -- Tornado Cash from the command line
   deposit <pool>               generate a note and deposit
   sync <pool>                  pull Deposit events into the leaf cache
   status <note|->              deposited? spent? leaf index?
-  withdraw <note|-> <to>       --relayer URL [--fee WEI] | --self   [--refund WEI] [--dry-run]
-  relayers <url>...            query relayer /status endpoints
+  withdraw <note|-> <to>       [--relayer URL] [--fee WEI] | --self   [--refund WEI] [--dry-run]
+                               no --relayer: the cheapest default relayer that answers
+  relayers [url...]            query relayer /status endpoints (default: the built-in list)
 
   --chain NAME                 the chain a <pool> is on: ethereum (default), optimism, arbitrum.
                                Notes carry their own chain
@@ -700,7 +748,7 @@ try {
         dryRun: v['dry-run'],
         threads,
       }),
-    relayers: () => relayers(rest),
+    relayers: () => relayers(rest, chain),
     help: () => out(HELP),
   }
   const name = v.help ? 'help' : cmd
