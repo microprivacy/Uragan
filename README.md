@@ -27,7 +27,7 @@ uragan setup   # download circuit + keys, check their pinned sha256
 ```sh
 uragan pools
 uragan deposit eth-0.1 --chain optimism
-uragan status - < note.txt
+uragan status
 uragan withdraw - 0xRecipient < note.txt
 ```
 

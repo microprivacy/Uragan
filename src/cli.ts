@@ -6,7 +6,7 @@
  * and signing via micro-eth-signer; zk primitives, witnesses and Groth16
  * proofs via micro-zk-proofs.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { availableParallelism } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -48,7 +48,7 @@ import {
   setRpcUrl,
   UsageError,
 } from './config.ts'
-import { createNote, hex32, parseNote, treePath } from './crypto.ts'
+import { createNote, hex32, type Note, parseNote, treePath } from './crypto.ts'
 import { prove, witness } from './prover.ts'
 import { proposeSafeTx, safeNonce } from './safe.ts'
 import { makeSigner, type SignerOpts } from './signer.ts'
@@ -63,13 +63,23 @@ process.stdout.on('error', (e: NodeJS.ErrnoException) => {
 const hexBytes = (b: Uint8Array) => `0x${bytesToHex(b)}`
 const fromHex = (h: string) => hexToBytes(h.slice(2))
 
-/** A note from the argument, or from stdin when the argument is `-`. Stdin keeps it out of argv and shell history. */
+/**
+ * A note from the argument, or from stdin when the argument is `-` or absent; '' when neither
+ * carries one. Stdin keeps it out of argv and shell history.
+ */
 async function readNote(arg: string | undefined): Promise<string> {
   if (arg && arg !== '-') return arg
-  if (process.stdin.isTTY) throw new UsageError('pass a note, or `-` and pipe it on stdin')
+  if (process.stdin.isTTY) return ''
   let s = ''
   for await (const chunk of process.stdin) s += chunk
   return s.trim()
+}
+
+/** A note that must be there: the argument, or stdin. */
+async function requireNote(arg: string | undefined): Promise<string> {
+  const note = await readNote(arg)
+  if (!note) throw new UsageError('pass a note, or `-` and pipe it on stdin')
+  return note
 }
 
 /**
@@ -304,8 +314,75 @@ async function syncCmd(key: string | undefined, chain?: number) {
   log(`${key}: ${leaves.length} leaves cached`)
 }
 
+/** Where `deposit` saves notes, and what `status` reads without an argument. */
+const notesDir = () => join(HOME, 'notes')
+
+/**
+ * Every saved note at a glance -- mostly: is anything still unspent? Each
+ * note's commitment and nullifier hash goes to the chain's RPC, which sees the
+ * whole set in one session; point --rpc-url at your own node if that matters.
+ */
+async function statusAll() {
+  const dir = notesDir()
+  const files = (existsSync(dir) ? readdirSync(dir) : []).filter((f) => f.endsWith('.txt')).sort()
+  if (!files.length) throw new UsageError(`no notes in ${dir} -- pass a note, or \`-\` and pipe it on stdin`)
+
+  type Row = { file: string; key: string; pool?: Pool; note?: Note; state: string }
+  const rows: Row[] = files.map((file) => {
+    try {
+      const note = parseNote(readFileSync(join(dir, file), 'utf8').trim())
+      const [key, pool] = notePool(note)
+      return { file, key, pool, note, state: 'unknown' }
+    } catch (e) {
+      return { file, key: '?', state: `unreadable: ${(e as Error).message}` }
+    }
+  })
+
+  // Two reads a note, batched into one multicall per chain.
+  for (const chainId of new Set(rows.flatMap((r) => (r.pool ? [r.pool.chainId] : [])))) {
+    const mine = rows.filter((r) => r.pool?.chainId === chainId)
+    const { net } = await connect(chainId)
+    const res = await net.multicall(
+      mine.flatMap((r) => [
+        {
+          to: r.pool!.address,
+          data: hexBytes(TORNADO.commitments.encodeInput(bytes32(r.note!.commitment))),
+          allowFailure: true,
+        },
+        {
+          to: r.pool!.address,
+          data: hexBytes(TORNADO.isSpent.encodeInput(bytes32(r.note!.nullifierHash))),
+          allowFailure: true,
+        },
+      ]),
+    )
+    mine.forEach((r, i) => {
+      const deposited = decoded(res[2 * i]!, (b) => TORNADO.commitments.decodeOutput(b))
+      const spent = decoded(res[2 * i + 1]!, (b) => TORNADO.isSpent.decodeOutput(b))
+      if (deposited === undefined || spent === undefined) return // stays unknown
+      r.state = !deposited ? 'not deposited' : spent ? 'spent' : 'unspent'
+    })
+  }
+
+  out(`${'NOTE'.padEnd(44)} ${'POOL'.padEnd(14)} ${'CHAIN'.padEnd(10)} STATE`)
+  for (const r of rows) {
+    out(`${r.file.padEnd(44)} ${r.key.padEnd(14)} ${(r.pool ? chainName(r.pool.chainId) : '?').padEnd(10)} ${r.state}`)
+  }
+  const count = (state: string) => rows.filter((r) => r.state === state).length
+  log(
+    `${rows.length} notes in ${dir}: ${count('unspent')} unspent, ${count('spent')} spent, ` +
+      `${count('not deposited')} never deposited`,
+  )
+}
+
 async function status(noteArg: string | undefined) {
-  const n = parseNote(await readNote(noteArg))
+  const text = await readNote(noteArg)
+  // No note given and nothing piped in: every saved note.
+  if (!text) {
+    if (noteArg === undefined) return statusAll()
+    throw new UsageError('pass a note, or `-` and pipe it on stdin')
+  }
+  const n = parseNote(text)
   const [key, p] = notePool(n)
   const { net } = await connect(p.chainId)
   const [deposited, spent, total] = await Promise.all([
@@ -502,7 +579,7 @@ async function withdraw(noteArg: string | undefined, recipientArg: string | unde
     throw new UsageError('--fee only applies with a relayer; with --self or --safe there is no one to pay')
   }
 
-  const n = parseNote(await readNote(noteArg))
+  const n = parseNote(await requireNote(noteArg))
   const recipient = checksummed(recipientArg)
   const [, p] = notePool(n)
   // The contract requires msg.value == refund; ETH pools only accept 0.
@@ -701,7 +778,7 @@ const HELP = `uragan -- Tornado Cash from the command line
   note <pool>                  generate a note offline (no transaction)
   deposit <pool>               generate a note and deposit
   sync <pool>                  pull Deposit events into the leaf cache
-  status <note|->              deposited? spent? leaf index?
+  status [note|-]              deposited? spent? leaf index? (no note: every saved note)
   withdraw <note|-> <to>       [--relayer URL] [--fee WEI] | --self | --safe SAFE
                                [--refund WEI] [--dry-run]. No --relayer: the cheapest default
                                relayer that answers. --safe: propose it to that Safe's owners
