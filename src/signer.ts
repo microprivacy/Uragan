@@ -117,16 +117,24 @@ function localSigner(net: RpcClient, privateKey: string | Uint8Array): Signer {
 /** Sign with `wallet`; wait for receipts on `net`. The two are one client when --rpc-url is the wallet. */
 async function walletSigner(wallet: RpcClient, net: RpcClient, chainId: number, from?: string): Promise<Signer> {
   // The same pool address can hold a different pool on another chain, or
-  // nothing at all. The wallet's chain is its user's to switch -- even while
-  // a withdrawal syncs and proves -- so it is checked here and again just
-  // before sending, and the transaction names its chain for wallets that
-  // refuse a mismatch themselves.
+  // nothing at all. The wallet's user can switch its chain at any time --
+  // even while a withdrawal syncs and proves -- so it is asked to switch
+  // (EIP-3326) whenever it is elsewhere, here and again just before sending,
+  // and the transaction names its chain for wallets that refuse a mismatch
+  // themselves.
+  const want = `${chainName(chainId)} (${chainId})`
   const onChain = async () => {
+    const was = Number(await wallet.chainId())
+    if (was === chainId) return
+    process.stderr.write(`asking the wallet at ${urlOf(wallet)} to switch from ${chainName(was)} to ${want}\n`)
+    try {
+      await wallet.call('wallet_switchEthereumChain', { chainId: `0x${chainId.toString(16)}` })
+    } catch (e) {
+      throw new UsageError(`the wallet at ${urlOf(wallet)} would not switch to ${want}: ${(e as Error).message}`)
+    }
     const got = Number(await wallet.chainId())
     if (got !== chainId) {
-      throw new UsageError(
-        `the wallet at ${urlOf(wallet)} is on ${chainName(got)} (${got}), not ${chainName(chainId)} (${chainId}) -- switch it`,
-      )
+      throw new UsageError(`the wallet at ${urlOf(wallet)} is still on ${chainName(got)} (${got}), not ${want}`)
     }
   }
   try {

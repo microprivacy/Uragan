@@ -29,7 +29,7 @@ const RANGE_LIMIT =
   /block range|blocks? range|ranges? over|range \d+ exceeds|more than \d+ (blocks|results)|query returned more than|log response size|limited to .*range/i
 
 /** Never retried and never timed out: the wallet may already have signed, or may be waiting on a human. */
-const NOT_IDEMPOTENT = new Set(['eth_sendTransaction', 'eth_signTypedData_v4'])
+const NOT_IDEMPOTENT = new Set(['eth_sendTransaction', 'eth_signTypedData_v4', 'wallet_switchEthereumChain'])
 const REQUEST_TIMEOUT_MS = 60_000
 
 const urls = new WeakMap<RpcClient, string>()
@@ -41,10 +41,9 @@ export const urlOf = (net: RpcClient) => urls.get(net) ?? 'the RPC'
  * JSON-RPC over fetch -- RpcClient only needs `call`. Errors throw; they never
  * read as a value. Transient failures (429s, dropped connections, 5xx) are
  * retried with backoff, except the wallet's own methods: a retry after the
- * wallet already acted would send a second transaction, or ask its user
- * twice. `retry: false` is for a local
- * wallet, where a refused connection means it is not running and backing off
- * would only delay saying so.
+ * wallet already acted would send a second transaction, or ask its user twice.
+ * `retry: false` is for a local wallet, where a refused connection means it is
+ * not running and backing off would only delay saying so.
  */
 export function rpc(url: string, { retry = true } = {}): RpcClient {
   let id = 0
