@@ -19,7 +19,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { ReadStream } from 'node:tty'
 import { bytesToHex } from '@noble/hashes/utils.js'
-import { addr, Transaction } from 'micro-eth-signer'
+import { addr, signTyped as signTypedWithKey, Transaction } from 'micro-eth-signer'
 import { privFromLegacyKeystore } from 'micro-eth-signer/keystore.js'
 import type { RpcClient } from 'micro-eth-signer/net.js'
 import { rpc, urlOf } from './chain.ts'
@@ -27,10 +27,20 @@ import { chainName, customRpc, FRAME_RPC, UsageError } from './config.ts'
 
 export type Call = { to: string; value?: bigint; data?: Uint8Array }
 
+/** EIP-712 typed data, as eth_signTypedData_v4 takes it (EIP712Domain included in `types`). */
+export type TypedData = {
+  types: Record<string, { name: string; type: string }[]>
+  primaryType: string
+  domain: Record<string, unknown>
+  message: Record<string, unknown>
+}
+
 export type Signer = {
   address: string
   /** Send, wait for the receipt, and return the hash. Throws if it reverts. */
   send(call: Call): Promise<string>
+  /** Sign EIP-712 typed data; a 65-byte r || s || v signature, as hex. */
+  signTyped(typed: TypedData): Promise<string>
 }
 
 export type SignerOpts = { privateKey?: string; account?: string; keystore?: string; from?: string }
@@ -98,6 +108,9 @@ function localSigner(net: RpcClient, privateKey: string | Uint8Array): Signer {
       }
       return confirm(net, hash)
     },
+    async signTyped(typed) {
+      return signTypedWithKey(typed as never, privateKey)
+    },
   }
 }
 
@@ -154,6 +167,11 @@ async function walletSigner(wallet: RpcClient, net: RpcClient, chainId: number, 
         chainId: `0x${chainId.toString(16)}`,
       })) as string
       return confirm(net, hash)
+    },
+    async signTyped(typed) {
+      await onChain()
+      const json = JSON.stringify(typed, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))
+      return (await wallet.call('eth_signTypedData_v4', address, json)) as string
     },
   }
 }

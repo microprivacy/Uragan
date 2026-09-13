@@ -44,11 +44,13 @@ import {
   RELEASE,
   type Relayer,
   rpcUrl,
+  safePrefix,
   setRpcUrl,
   UsageError,
 } from './config.ts'
 import { createNote, hex32, parseNote, treePath } from './crypto.ts'
 import { prove, witness } from './prover.ts'
+import { proposeSafeTx, safeNonce } from './safe.ts'
 import { makeSigner, type SignerOpts } from './signer.ts'
 
 const log = (s: string) => process.stderr.write(`${s}\n`)
@@ -480,17 +482,25 @@ type WithdrawOpts = SignerOpts & {
   refund?: string
   maxFeePercent: number
   self?: boolean
+  safe?: string
   dryRun?: boolean
   threads: number
 }
 
 async function withdraw(noteArg: string | undefined, recipientArg: string | undefined, o: WithdrawOpts) {
-  if (!recipientArg) throw new UsageError('usage: uragan withdraw <note|-> <recipient> [--relayer URL | --self]')
-  if (o.relayer && o.self) throw new UsageError('--relayer and --self are exclusive')
+  if (!recipientArg) {
+    throw new UsageError('usage: uragan withdraw <note|-> <recipient> [--relayer URL | --self | --safe SAFE]')
+  }
+  if ([o.relayer, o.self, o.safe].filter(Boolean).length > 1) {
+    throw new UsageError('--relayer, --self and --safe are exclusive')
+  }
+  // With --safe the Safe sends the withdrawal, and the signer only proposes it.
+  const safe = o.safe === undefined ? undefined : checksummed(o.safe)
   const explicitFee = baseUnits('fee', o.fee)
   const refund = baseUnits('refund', o.refund) ?? 0n
-  if (explicitFee !== undefined && o.self)
-    throw new UsageError('--fee only applies with a relayer; with --self there is no one to pay')
+  if (explicitFee !== undefined && (o.self || safe)) {
+    throw new UsageError('--fee only applies with a relayer; with --self or --safe there is no one to pay')
+  }
 
   const n = parseNote(await readNote(noteArg))
   const recipient = checksummed(recipientArg)
@@ -499,9 +509,13 @@ async function withdraw(noteArg: string | undefined, recipientArg: string | unde
   if (refund !== 0n && !p.tokenAddress) throw new UsageError('ETH pools require --refund 0 (refund is for token pools)')
   const amount = parseUnits(p.amount, p.decimals)
   const { net } = await connect(p.chainId)
-  // Resolve a --self signer before syncing and proving, so a misconfigured
-  // wallet or key fails in a second rather than after all that work.
-  const signer = o.self && !o.dryRun ? await makeSigner(net, p.chainId, o) : undefined
+  // Resolve a --self or --safe signer, and the Safe, before syncing and
+  // proving, so a misconfiguration fails in a second rather than after all that work.
+  const signer = (o.self || safe) && !o.dryRun ? await makeSigner(net, p.chainId, o) : undefined
+  if (safe) {
+    safePrefix(p.chainId)
+    await safeNonce(net, p.chainId, safe)
+  }
 
   const [spent, deposited] = await Promise.all([
     read(net, p.address, TORNADO.isSpent, bytes32(n.nullifierHash)),
@@ -513,7 +527,7 @@ async function withdraw(noteArg: string | undefined, recipientArg: string | unde
   let relayer = ADDRESS_ZERO
   let fee = 0n
   let relayerUrl: string | undefined
-  if (!o.self) {
+  if (!o.self && !safe) {
     let st: RelayerStatus
     if (o.relayer) {
       relayerUrl = o.relayer
@@ -612,7 +626,7 @@ async function withdraw(noteArg: string | undefined, recipientArg: string | unde
           relayer,
           fee: String(fee),
           refund: String(refund),
-          value: String(o.self ? refund : 0n), // the refund rides along as msg.value
+          value: String(o.self || safe ? refund : 0n), // the refund rides along as msg.value
           calldata: hexBytes(calldata),
         },
         null,
@@ -635,6 +649,20 @@ async function withdraw(noteArg: string | undefined, recipientArg: string | unde
       n.nullifierHash,
     )
     log(`withdrawn: ${hash}`)
+    return
+  }
+
+  if (safe) {
+    log(`proposing to Safe ${safe} as ${signer!.address} -- the Safe, sending it, is linked to the withdrawal`)
+    const { safeTxHash, queue } = await proposeSafeTx({
+      net,
+      chainId: p.chainId,
+      safe,
+      signer: signer!,
+      call: { to: p.address, value: refund, data: calldata },
+    })
+    log(`proposed ${safeTxHash}; the owners confirm and execute it at ${queue}`)
+    log('the note stays unspent until then -- `uragan status` shows when it is spent')
     return
   }
 
@@ -674,8 +702,9 @@ const HELP = `uragan -- Tornado Cash from the command line
   deposit <pool>               generate a note and deposit
   sync <pool>                  pull Deposit events into the leaf cache
   status <note|->              deposited? spent? leaf index?
-  withdraw <note|-> <to>       [--relayer URL] [--fee WEI] | --self   [--refund WEI] [--dry-run]
-                               no --relayer: the cheapest default relayer that answers
+  withdraw <note|-> <to>       [--relayer URL] [--fee WEI] | --self | --safe SAFE
+                               [--refund WEI] [--dry-run]. No --relayer: the cheapest default
+                               relayer that answers. --safe: propose it to that Safe's owners
   relayers [url...]            query relayer /status endpoints (default: the built-in list)
 
   --chain NAME                 the chain a <pool> is on: ethereum (default), optimism, arbitrum.
@@ -685,7 +714,7 @@ const HELP = `uragan -- Tornado Cash from the command line
   --max-fee-percent N          refuse a relayer-computed fee above N% of the amount (default 5)
   --threads N                  prover threads (default: all cores)
 
-signing (deposit, withdraw --self) -- a local key, or else a wallet:
+signing (deposit, withdraw --self, and the proposer for --safe) -- a local key, or else a wallet:
   --private-key PK             sign locally (visible in ps while running; prefer the env var)
   URAGAN_PRIVATE_KEY           the same, from the environment
   --account NAME               cast keystore (~/.foundry/keystores/NAME)
@@ -702,6 +731,7 @@ const OPTIONS = {
   refund: { type: 'string' },
   'max-fee-percent': { type: 'string' },
   self: { type: 'boolean' },
+  safe: { type: 'string' },
   'dry-run': { type: 'boolean' },
   account: { type: 'string' },
   keystore: { type: 'string' },
@@ -745,6 +775,7 @@ try {
         refund: v.refund,
         maxFeePercent,
         self: v.self,
+        safe: v.safe,
         dryRun: v['dry-run'],
         threads,
       }),

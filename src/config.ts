@@ -35,14 +35,23 @@ export const ARTIFACTS: Record<string, string> = {
  * Supported chains, each with the public RPC used unless --rpc-url is given.
  * Not the chains' own endpoints: those cap eth_getLogs at 10k blocks and
  * rate-limit hard. These serve archive logs over wide ranges without a key.
+ * `safe` is the chain's EIP-3770 short name, which the Safe Transaction
+ * Service and the Safe app address it by.
  */
-const CHAINS: Record<number, { name: string; rpc: string }> = {
-  1: { name: 'Ethereum', rpc: 'https://mainnet.gateway.tenderly.co' },
-  10: { name: 'Optimism', rpc: 'https://optimism.gateway.tenderly.co' },
-  42161: { name: 'Arbitrum', rpc: 'https://arbitrum.gateway.tenderly.co' },
+const CHAINS: Record<number, { name: string; rpc: string; safe: string }> = {
+  1: { name: 'Ethereum', rpc: 'https://mainnet.gateway.tenderly.co', safe: 'eth' },
+  10: { name: 'Optimism', rpc: 'https://optimism.gateway.tenderly.co', safe: 'oeth' },
+  42161: { name: 'Arbitrum', rpc: 'https://arbitrum.gateway.tenderly.co', safe: 'arb1' },
 }
 
 export const chainName = (id: number) => CHAINS[id]?.name ?? `chain ${id}`
+
+/** The chain's EIP-3770 short name, for the Safe Transaction Service and app. */
+export function safePrefix(chainId: number): string {
+  const prefix = CHAINS[chainId]?.safe
+  if (!prefix) throw new UsageError(`no Safe Transaction Service known for ${chainName(chainId)}`)
+  return prefix
+}
 
 /** Frame's local JSON-RPC: the signer when neither a key nor --rpc-url is given. */
 export const FRAME_RPC = 'http://127.0.0.1:1248'
