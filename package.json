@@ -20,6 +20,7 @@
     "test": "node --test test/*.test.ts"
   },
   "description": "Tornado Cash client: TypeScript on Node and noble cryptography",
+  "license": "MPL-2.0",
   "bin": {
     "uragan": "./src/cli.ts"
   },

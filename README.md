@@ -38,4 +38,4 @@ Back up every note: it is the only way to withdraw. Run `uragan help` for all co
 
 ## License
 
-GPL-3.0
+MPL-2.0
