@@ -25,10 +25,12 @@ import {
   assertChain,
   bytes32,
   cachedLeaves,
+  dropCache,
   ERC20,
   poolTree,
   read,
   rpc,
+  switchChain,
   syncLeaves,
   TORNADO,
   VERIFIER,
@@ -53,7 +55,7 @@ import {
   setRpcUrl,
   UsageError,
 } from './config.ts'
-import { createNote, hex32, type Note, parseNote, treePath } from './crypto.ts'
+import { assertPrimitives, createNote, hex32, type Note, parseNote, treePath } from './crypto.ts'
 import { prove, witness } from './prover.ts'
 import { proposeSafeTx, safeNonce } from './safe.ts'
 import { makeSigner, type SignerOpts } from './signer.ts'
@@ -69,22 +71,19 @@ const hexBytes = (b: Uint8Array) => `0x${bytesToHex(b)}`
 const fromHex = (h: string) => hexToBytes(h.slice(2))
 
 /**
- * A note from the argument, or from stdin when the argument is `-` or absent; '' when neither
- * carries one. Stdin keeps it out of argv and shell history.
+ * The note in the argument, or on stdin when the argument is `-` -- which
+ * keeps it out of argv and shell history. Only `-` reads stdin: a command run
+ * with stdin left open (ssh without -t, a loop reading a file) must not hang
+ * on it, or swallow what it carries.
  */
-async function readNote(arg: string | undefined): Promise<string> {
-  if (arg && arg !== '-') return arg
-  if (process.stdin.isTTY) return ''
+async function requireNote(arg: string | undefined): Promise<string> {
+  if (arg === undefined) throw new UsageError('pass a note, or `-` and pipe it on stdin')
+  if (arg !== '-') return arg
+  if (process.stdin.isTTY) throw new UsageError('`-` reads the note from stdin, but nothing is piped in')
   let s = ''
   for await (const chunk of process.stdin) s += chunk
+  if (!s.trim()) throw new UsageError('stdin was empty -- pipe the note in')
   return s.trim()
-}
-
-/** A note that must be there: the argument, or stdin. */
-async function requireNote(arg: string | undefined): Promise<string> {
-  const note = await readNote(arg)
-  if (!note) throw new UsageError('pass a note, or `-` and pipe it on stdin')
-  return note
 }
 
 /**
@@ -122,7 +121,9 @@ function intFlag(flag: string, v: string | undefined, fallback: number, min: num
  * the string every other Tornado client reads and writes.
  */
 function notePool(n: { currency: string; amount: string; netId: number }): [string, Pool] {
-  const hit = Object.entries(pools(n.netId)).find(([, p]) => p.currency === n.currency && p.amount === n.amount)
+  const hit = Object.entries(pools(n.netId)).find(
+    ([, p]) => p.currency.toLowerCase() === n.currency && p.amount === n.amount,
+  )
   if (!hit) throw new UsageError(`no pool for ${n.currency} ${n.amount} on ${chainName(n.netId)} (see: uragan pools)`)
   return hit
 }
@@ -131,21 +132,23 @@ function notePool(n: { currency: string; amount: string; netId: number }): [stri
  * An RPC client and the chain it serves. The chain is `chain` if known (a
  * note's, or --chain); else --rpc-url's own; else Ethereum. The RPC is
  * --rpc-url if given, else that chain's public default -- checked either way.
+ * `wallet`: a command about to transact asks an --rpc-url wallet on another
+ * chain to switch, where anything else is refused.
  */
-async function connect(chain?: number): Promise<{ net: RpcClient; chainId: number }> {
+async function connect(chain?: number, { wallet = false } = {}): Promise<{ net: RpcClient; chainId: number }> {
   if (chain === undefined && customRpc()) {
     const net = rpc(rpcUrl())
     return { net, chainId: Number(await net.chainId()) }
   }
   const chainId = chain ?? 1
   const net = rpc(rpcUrl(chainId))
-  await assertChain(net, chainId)
+  await (wallet && customRpc() ? switchChain(net, chainId) : assertChain(net, chainId))
   return { net, chainId }
 }
 
 /** A pool by name: on --chain, or the chain --rpc-url is on, or Ethereum. */
-async function connectPool(key: string, chain?: number): Promise<{ net: RpcClient; p: Pool }> {
-  const { net, chainId } = await connect(chain)
+async function connectPool(key: string, chain?: number, o = { wallet: false }): Promise<{ net: RpcClient; p: Pool }> {
+  const { net, chainId } = await connect(chain, o)
   return { net, p: pool(chainId, key) }
 }
 
@@ -257,23 +260,54 @@ async function noteCmd(key: string | undefined, chain?: number) {
   out(createNote(p.currency, p.amount, p.chainId).note)
 }
 
-async function deposit(key: string | undefined, chain: number | undefined, sig: SignerOpts, noteArg?: string) {
-  if (!key) throw new UsageError('usage: uragan deposit <pool> [--note <note|->]')
-  const { net, p } = await connectPool(key, chain)
-  await assertPool(net, p, key)
+/** Where `deposit` saves notes, and what `status` reads without an argument. */
+const notesDir = () => join(HOME, 'notes')
+
+/** Save a note in notesDir() unless a file there holds it already; the file it is in. */
+function saveNote(n: Note, p: Pool, key: string): { file: string; fresh: boolean } {
+  const dir = notesDir()
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const have = readdirSync(dir).find((f) => f.endsWith('.txt') && readFileSync(join(dir, f), 'utf8').trim() === n.note)
+  if (have) return { file: join(dir, have), fresh: false }
+  const stamp = new Date().toISOString().replace(/[:.]/g, '')
+  const file = join(dir, `${stamp}-${chainName(p.chainId).toLowerCase()}-${key}.txt`)
+  writeFileSync(file, `${n.note}\n`, { mode: 0o600, flag: 'wx' })
+  return { file, fresh: true }
+}
+
+/**
+ * The pool a deposit goes into. With --note it is the note's own -- a note
+ * names its chain, currency and amount -- and <pool> and --chain, needless
+ * then, must agree with it: the same pool address can be another chain's pool.
+ */
+async function depositPool(
+  key: string | undefined,
+  chain: number | undefined,
+  existing: Note | undefined,
+): Promise<{ net: RpcClient; p: Pool; key: string }> {
+  if (!existing) {
+    if (!key) throw new UsageError('usage: uragan deposit <pool>, or uragan deposit --note <note|->')
+    return { ...(await connectPool(key, chain, { wallet: true })), key }
+  }
+  const [name, p] = notePool(existing)
+  const where = `${name} on ${chainName(p.chainId)}`
+  if (key !== undefined && key !== name) throw new UsageError(`that note is for ${where}, not ${key}`)
+  if (chain !== undefined && chain !== p.chainId)
+    throw new UsageError(`that note is for ${where}, not ${chainName(chain)}`)
+  return { net: (await connect(p.chainId, { wallet: true })).net, p, key: name }
+}
+
+async function deposit(keyArg: string | undefined, chain: number | undefined, sig: SignerOpts, noteArg?: string) {
   // --note deposits a note you already hold -- from an attempt that never
   // landed, or made offline by `uragan note` -- instead of making another.
   const existing = noteArg === undefined ? undefined : parseNote(await requireNote(noteArg))
-  if (existing) {
-    const [was, from] = notePool(existing)
-    if (from.address !== p.address) {
-      throw new UsageError(
-        `that note is for ${was} on ${chainName(existing.netId)}, not ${key} on ${chainName(p.chainId)}`,
-      )
-    }
-    if (await read(net, p.address, TORNADO.commitments, bytes32(existing.commitment))) {
-      throw new UsageError('that note is deposited already -- `uragan status` says whether it is still unspent')
-    }
+  // Nothing on-chain checks a commitment: one from a broken hash could never
+  // be withdrawn. So the self-check guards a note passed in, as it does a new one.
+  assertPrimitives()
+  const { net, p, key } = await depositPool(keyArg, chain, existing)
+  await assertPool(net, p, key)
+  if (existing && (await read(net, p.address, TORNADO.commitments, bytes32(existing.commitment)))) {
+    throw new UsageError('that note is deposited already -- `uragan status` says whether it is still unspent')
   }
   const signer = await makeSigner(net, p.chainId, sig)
   const amount = parseUnits(p.amount, p.decimals)
@@ -312,20 +346,14 @@ async function deposit(key: string | undefined, chain: number | undefined, sig: 
 
   // Persist the note BEFORE broadcasting. A funded deposit whose note is lost
   // is unrecoverable; an orphan note for a failed deposit is harmless. A note
-  // passed with --note is already saved wherever its holder keeps it.
-  if (existing) {
-    log('depositing the note you passed; it is neither printed nor saved again')
-  } else {
-    const dir = join(HOME, 'notes')
-    mkdirSync(dir, { recursive: true, mode: 0o700 })
-    const file = join(
-      dir,
-      `${new Date().toISOString().replace(/[:.]/g, '')}-${chainName(p.chainId).toLowerCase()}-${key}.txt`,
-    )
-    writeFileSync(file, `${n.note}\n`, { mode: 0o600 })
-    out(n.note)
-    log(`note saved to ${file} -- back it up. Without it the funds are GONE.`)
-  }
+  // passed with --note counts too: piped from `uragan note`, it is nowhere else.
+  const saved = saveNote(n, p, key)
+  if (!existing) out(n.note)
+  log(
+    saved.fresh
+      ? `note saved to ${saved.file} -- back it up. Without it the funds are GONE.`
+      : `the note is saved already, in ${saved.file}`,
+  )
 
   log(`depositing ${p.amount} ${p.symbol} into ${p.address} from ${signer.address} ...`)
   try {
@@ -342,9 +370,6 @@ async function syncCmd(key: string | undefined, chain?: number) {
   log(`${key}: ${leaves.length} leaves cached`)
 }
 
-/** Where `deposit` saves notes, and what `status` reads without an argument. */
-const notesDir = () => join(HOME, 'notes')
-
 /**
  * Every saved note at a glance -- mostly: is anything still unspent? Each
  * note's commitment and nullifier hash goes to the chain's RPC, which sees the
@@ -355,48 +380,65 @@ async function statusAll() {
   const files = (existsSync(dir) ? readdirSync(dir) : []).filter((f) => f.endsWith('.txt')).sort()
   if (!files.length) throw new UsageError(`no notes in ${dir} -- pass a note, or \`-\` and pipe it on stdin`)
 
-  type Row = { file: string; key: string; pool?: Pool; note?: Note; state: string }
-  const rows: Row[] = files.map((file) => {
+  type Readable = { file: string; key: string; pool: Pool; note: Note; state: string }
+  const readable: Readable[] = []
+  const rows = files.map((file): Readable | { file: string; unreadable: string } => {
     try {
       const note = parseNote(readFileSync(join(dir, file), 'utf8').trim())
       const [key, pool] = notePool(note)
-      return { file, key, pool, note, state: 'unknown' }
+      const r = { file, key, pool, note, state: 'unknown' }
+      readable.push(r)
+      return r
     } catch (e) {
-      return { file, key: '?', state: `unreadable: ${(e as Error).message}` }
+      return { file, unreadable: (e as Error).message }
     }
   })
 
-  // Two reads a note, batched into one multicall per chain.
-  for (const chainId of new Set(rows.flatMap((r) => (r.pool ? [r.pool.chainId] : [])))) {
-    const mine = rows.filter((r) => r.pool?.chainId === chainId)
-    const { net } = await connect(chainId)
-    const res = await net.multicall(
-      mine.flatMap((r) => [
-        {
-          to: r.pool!.address,
-          data: hexBytes(TORNADO.commitments.encodeInput(bytes32(r.note!.commitment))),
-          allowFailure: true,
-        },
-        {
-          to: r.pool!.address,
-          data: hexBytes(TORNADO.isSpent.encodeInput(bytes32(r.note!.nullifierHash))),
-          allowFailure: true,
-        },
-      ]),
-    )
-    mine.forEach((r, i) => {
-      const deposited = decoded(res[2 * i]!, (b) => TORNADO.commitments.decodeOutput(b))
-      const spent = decoded(res[2 * i + 1]!, (b) => TORNADO.isSpent.decodeOutput(b))
-      if (deposited === undefined || spent === undefined) return // stays unknown
-      r.state = !deposited ? 'not deposited' : spent ? 'spent' : 'unspent'
-    })
-  }
+  // Two reads a note, batched into one multicall per chain, all chains at
+  // once. A chain that fails leaves its notes unknown; the rest still print.
+  const chains = [...new Set(readable.map((r) => r.pool.chainId))]
+  const results = await Promise.allSettled(
+    chains.map(async (chainId) => {
+      const mine = readable.filter((r) => r.pool.chainId === chainId)
+      const { net } = await connect(chainId)
+      const res = await net.multicall(
+        mine.flatMap((r) => [
+          {
+            to: r.pool.address,
+            data: hexBytes(TORNADO.commitments.encodeInput(bytes32(r.note.commitment))),
+            allowFailure: true,
+          },
+          {
+            to: r.pool.address,
+            data: hexBytes(TORNADO.isSpent.encodeInput(bytes32(r.note.nullifierHash))),
+            allowFailure: true,
+          },
+        ]),
+      )
+      mine.forEach((r, i) => {
+        const deposited = decoded(res[2 * i]!, (b) => TORNADO.commitments.decodeOutput(b))
+        const spent = decoded(res[2 * i + 1]!, (b) => TORNADO.isSpent.decodeOutput(b))
+        if (deposited === undefined || spent === undefined) return // stays unknown
+        r.state = !deposited ? 'not deposited' : spent ? 'spent' : 'unspent'
+      })
+    }),
+  )
+  results.forEach((r, i) => {
+    if (r.status === 'rejected') {
+      log(`${chainName(chains[i]!)}: ${(r.reason as Error).message} -- its notes show as unknown`)
+    }
+  })
 
-  out(`${'NOTE'.padEnd(44)} ${'POOL'.padEnd(14)} ${'CHAIN'.padEnd(10)} STATE`)
+  const width = Math.max(4, ...files.map((f) => f.length))
+  out(`${'NOTE'.padEnd(width)} ${'POOL'.padEnd(14)} ${'CHAIN'.padEnd(10)} STATE`)
   for (const r of rows) {
-    out(`${r.file.padEnd(44)} ${r.key.padEnd(14)} ${(r.pool ? chainName(r.pool.chainId) : '?').padEnd(10)} ${r.state}`)
+    out(
+      'unreadable' in r
+        ? `${r.file.padEnd(width)} ${'?'.padEnd(14)} ${'?'.padEnd(10)} unreadable: ${r.unreadable}`
+        : `${r.file.padEnd(width)} ${r.key.padEnd(14)} ${chainName(r.pool.chainId).padEnd(10)} ${r.state}`,
+    )
   }
-  const count = (state: string) => rows.filter((r) => r.state === state).length
+  const count = (state: string) => readable.filter((r) => r.state === state).length
   log(
     `${rows.length} notes in ${dir}: ${count('unspent')} unspent, ${count('spent')} spent, ` +
       `${count('not deposited')} never deposited`,
@@ -404,13 +446,9 @@ async function statusAll() {
 }
 
 async function status(noteArg: string | undefined) {
-  const text = await readNote(noteArg)
-  // No note given and nothing piped in: every saved note.
-  if (!text) {
-    if (noteArg === undefined) return statusAll()
-    throw new UsageError('pass a note, or `-` and pipe it on stdin')
-  }
-  const n = parseNote(text)
+  // No note: every saved note. Stdin is read only for `-`.
+  if (noteArg === undefined) return statusAll()
+  const n = parseNote(await requireNote(noteArg))
   const [key, p] = notePool(n)
   const { net } = await connect(p.chainId)
   const [deposited, spent, total] = await Promise.all([
@@ -613,7 +651,7 @@ async function withdraw(noteArg: string | undefined, recipientArg: string | unde
   // The contract requires msg.value == refund; ETH pools only accept 0.
   if (refund !== 0n && !p.tokenAddress) throw new UsageError('ETH pools require --refund 0 (refund is for token pools)')
   const amount = parseUnits(p.amount, p.decimals)
-  const { net } = await connect(p.chainId)
+  const { net } = await connect(p.chainId, { wallet: true })
   // Resolve a --self or --safe signer, and the Safe, before syncing and
   // proving, so a misconfiguration fails in a second rather than after all that work.
   const signer = (o.self || safe) && !o.dryRun ? await makeSigner(net, p.chainId, o) : undefined
@@ -671,15 +709,25 @@ async function withdraw(noteArg: string | undefined, recipientArg: string | unde
     )
   }
 
-  const tree = await poolTree(net, p, log)
+  // The contract accepts only its last 100 roots. If ours is not among them the
+  // leaf set is wrong -- a reorg deeper than sync re-scans, or a damaged cache
+  // -- and submitting would burn gas on a guaranteed revert. Start over, once.
+  const known = (root: bigint) => read(net, p.address, TORNADO.isKnownRoot, bytes32(root))
+  let tree = await poolTree(net, p, log)
+  if (!(await known(tree.root))) {
+    log(`computed root ${hex32(tree.root)} is not one the pool knows; resyncing its leaves from scratch`)
+    dropCache(p)
+    tree = await poolTree(net, p, log)
+    if (!(await known(tree.root))) {
+      throw new Error(
+        `computed root ${hex32(tree.root)} is still unknown on-chain after a full resync -- the RPC may lag or be ` +
+          'wrong; try again later, or another --rpc-url',
+      )
+    }
+  }
   const index = tree.layers[0]!.indexOf(n.commitment)
   if (index < 0) throw new Error('commitment missing from the synced leaves')
   log(`leaf ${index} of ${tree.layers[0]!.length}`)
-  // The contract accepts only its last 100 roots. If ours is not among them the
-  // leaf set is wrong, and submitting would burn gas on a guaranteed revert.
-  if (!(await read(net, p.address, TORNADO.isKnownRoot, bytes32(tree.root)))) {
-    throw new Error(`computed root ${hex32(tree.root)} is not known on-chain -- the leaf cache is stale or corrupt`)
-  }
 
   const path = treePath(tree, index)
   // Exactly the public inputs the contract derives from the withdraw() arguments.
@@ -805,7 +853,8 @@ const HELP = `uragan -- Tornado Cash from the command line
   verify                       re-check every pool address on-chain
   note <pool>                  generate a note offline (no transaction)
   deposit <pool>               generate a note and deposit; --note <note|-> deposits one
-                               you already hold, e.g. after an attempt that failed
+                               you already hold, e.g. after an attempt that failed (the note
+                               names its pool and chain; it is saved first, like a new one)
   sync <pool>                  pull Deposit events into the leaf cache
   status [note|-]              deposited? spent? leaf index? (no note: every saved note)
   withdraw <note|-> <to>       [--relayer URL] [--fee WEI] | --self | --safe SAFE
@@ -891,6 +940,24 @@ try {
   }
   const name = v.help ? 'help' : cmd
   if (!Object.hasOwn(commands, name)) throw new UsageError(`unknown command '${name}'\n\n${HELP}`)
+  // Flags only some commands read. Anywhere else they would be dropped
+  // silently -- and --note on status would turn a query about one note into
+  // one about every saved note.
+  const only: [keyof typeof v, string[]][] = [
+    ['note', ['deposit']],
+    ...(['relayer', 'fee', 'refund', 'self', 'safe', 'dry-run', 'max-fee-percent', 'threads'] as const).map(
+      (f): [keyof typeof v, string[]] => [f, ['withdraw']],
+    ),
+    ...(['private-key', 'account', 'keystore', 'from'] as const).map((f): [keyof typeof v, string[]] => [
+      f,
+      ['deposit', 'withdraw'],
+    ]),
+  ]
+  for (const [flag, cmds] of only) {
+    if (name !== 'help' && v[flag] !== undefined && !cmds.includes(name)) {
+      throw new UsageError(`--${flag} is for ${cmds.join(' and ')}, not ${name}`)
+    }
+  }
   await commands[name]!()
 } catch (e) {
   // parseArgs rejects an unknown flag or a missing value with ERR_PARSE_ARGS_*:

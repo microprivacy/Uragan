@@ -115,9 +115,10 @@ export type Pool = {
  * from context -- --chain, --rpc-url's chain, or a note's netId.
  * URAGAN_INSTANCES points it at a fork, testnet, or new deployment.
  */
+let parsed: Record<string, Record<string, Omit<Pool, 'chainId'>>> | undefined
 function registry(): Record<string, Record<string, Omit<Pool, 'chainId'>>> {
-  const file = process.env.URAGAN_INSTANCES ?? join(ROOT, 'src/instances.json')
-  return JSON.parse(readFileSync(file, 'utf8'))
+  parsed ??= JSON.parse(readFileSync(process.env.URAGAN_INSTANCES ?? join(ROOT, 'src/instances.json'), 'utf8'))
+  return parsed!
 }
 
 /** Registry chains that work without --rpc-url. */

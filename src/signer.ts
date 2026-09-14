@@ -27,8 +27,8 @@ import { bytesToHex } from '@noble/hashes/utils.js'
 import { addr, signTyped as signTypedWithKey, Transaction } from 'micro-eth-signer'
 import { privFromLegacyKeystore } from 'micro-eth-signer/keystore.js'
 import type { RpcClient } from 'micro-eth-signer/net.js'
-import { rpc, urlOf } from './chain.ts'
-import { chainName, customRpc, FRAME_RPC, UsageError } from './config.ts'
+import { rpc, switchChain, urlOf } from './chain.ts'
+import { customRpc, FRAME_RPC, UsageError } from './config.ts'
 
 export type Call = { to: string; value?: bigint; data?: Uint8Array }
 
@@ -127,21 +127,7 @@ async function walletSigner(wallet: RpcClient, net: RpcClient, chainId: number, 
   // (EIP-3326) whenever it is elsewhere, here and again just before sending,
   // and the transaction names its chain for wallets that refuse a mismatch
   // themselves.
-  const want = `${chainName(chainId)} (${chainId})`
-  const onChain = async () => {
-    const was = Number(await wallet.chainId())
-    if (was === chainId) return
-    process.stderr.write(`asking the wallet at ${urlOf(wallet)} to switch from ${chainName(was)} to ${want}\n`)
-    try {
-      await wallet.call('wallet_switchEthereumChain', { chainId: `0x${chainId.toString(16)}` })
-    } catch (e) {
-      throw new UsageError(`the wallet at ${urlOf(wallet)} would not switch to ${want}: ${(e as Error).message}`)
-    }
-    const got = Number(await wallet.chainId())
-    if (got !== chainId) {
-      throw new UsageError(`the wallet at ${urlOf(wallet)} is still on ${chainName(got)} (${got}), not ${want}`)
-    }
-  }
+  const onChain = () => switchChain(wallet, chainId)
   try {
     await onChain()
   } catch (e) {

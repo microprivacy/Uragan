@@ -7,7 +7,7 @@
  * Everything that touches the chain: JSON-RPC transport, contract bindings,
  * Deposit-log sync, and the cached Merkle tree. Uses micro-eth-signer.
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { STATUS_CODES } from 'node:http'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -109,6 +109,28 @@ export function rpc(url: string, { retry = true } = {}): RpcClient {
  * Refuse to act on a chain through an RPC on another. The same pool address
  * can hold a different pool there, or nothing at all.
  */
+/**
+ * Bring `net` onto `chainId`, asking it to switch (EIP-3326) if it is
+ * elsewhere -- a wallet does, after its user approves; a node refuses. Its
+ * user can switch it back at any time, so call this right before relying on it.
+ */
+export async function switchChain(net: RpcClient, chainId: number): Promise<void> {
+  const was = Number(await net.chainId())
+  if (was === chainId) return
+  const want = `${chainName(chainId)} (${chainId})`
+  process.stderr.write(`asking ${urlOf(net)} to switch from ${chainName(was)} to ${want}\n`)
+  try {
+    await net.call('wallet_switchEthereumChain', { chainId: `0x${chainId.toString(16)}` })
+  } catch (e) {
+    throw new UsageError(
+      `${urlOf(net)} is on ${chainName(was)} (${was}), not ${want}, and would not switch: ${(e as Error).message}\n` +
+        `  switch it yourself, or use an RPC for ${chainName(chainId)}`,
+    )
+  }
+  const got = Number(await net.chainId())
+  if (got !== chainId) throw new UsageError(`${urlOf(net)} is still on ${chainName(got)} (${got}), not ${want}`)
+}
+
 export async function assertChain(net: RpcClient, chainId: number): Promise<void> {
   const got = Number(await net.chainId())
   if (got !== chainId) {
@@ -248,9 +270,9 @@ export const bytes32 = (n: bigint): Uint8Array => numberToBytesBE(n, 32)
 /**
  * Blocks behind the head that every sync re-scans, so a reorg or an RPC whose
  * log index lags its block number heals on the next run instead of leaving a
- * permanent hole.
+ * permanent hole. Polygon PoS has reorged well past a hundred blocks.
  */
-const REORG_MARGIN = 12
+const reorgMargin = (chainId: number) => (chainId === 137 ? 256 : 12)
 const SYNC_CONCURRENCY = 4
 
 /**
@@ -266,6 +288,11 @@ const PAGE_LARGE = 8000
 
 /** Keyed by chain and contract: a fork or testnet registry can reuse the same pool names. */
 const cacheBase = (pool: Pool) => join(HOME, 'cache', `${pool.chainId}-${pool.address.toLowerCase()}`)
+
+/** Forget a pool's leaves and tree, so the next sync starts from its deployment. */
+export function dropCache(pool: Pool): void {
+  for (const ext of ['leaves', 'block', 'tree']) rmSync(`${cacheBase(pool)}.${ext}`, { force: true })
+}
 
 type Leaf = { commitment: bigint; block: number }
 
@@ -305,7 +332,7 @@ export async function syncLeaves(net: RpcClient, pool: Pool, log: (s: string) =>
   const file = `${cacheBase(pool)}.leaves`
   const markFile = `${cacheBase(pool)}.block`
   // Everything up to the mark is final. A leaf above it was fetched within
-  // REORG_MARGIN of the head and may since have been reorged out -- possibly
+  // the reorg margin of the head and may since have been reorged out -- possibly
   // replaced by another deposit at the same index, which a count of leaves
   // cannot tell apart. Drop those and fetch them again.
   const mark = existsSync(markFile) ? Number(readFileSync(markFile, 'utf8')) : pool.deployedBlock - 1
@@ -405,7 +432,7 @@ export async function syncLeaves(net: RpcClient, pool: Pool, log: (s: string) =>
           finished.delete(contiguous + 1)
           contiguous = end
         }
-        writeFileSync(markFile, String(Math.min(contiguous, head - REORG_MARGIN)))
+        writeFileSync(markFile, String(Math.min(contiguous, head - reorgMargin(pool.chainId))))
         process.stderr.write(`\r  block ${contiguous} / ${head}   leaves ${have} / ${want}   range ${chunk}      `)
         if (id >= workers) return
       }
@@ -429,7 +456,7 @@ export async function syncLeaves(net: RpcClient, pool: Pool, log: (s: string) =>
   for (let attempt = 0; have < want && attempt < 3; attempt++) {
     await sleep(3000)
     const tip = await net.height()
-    if (await fetchRange([Math.max(pool.deployedBlock, tip - REORG_MARGIN), tip])) changed = true
+    if (await fetchRange([Math.max(pool.deployedBlock, tip - reorgMargin(pool.chainId)), tip])) changed = true
   }
   // Still short: the leaf file was lost or edited, or the RPC returned an
   // incomplete page (a flaky one does, now and then). The chain is the source
