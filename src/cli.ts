@@ -11,7 +11,7 @@
  * and signing via micro-eth-signer; zk primitives, witnesses and Groth16
  * proofs via micro-zk-proofs.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { availableParallelism } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -371,16 +371,18 @@ async function syncCmd(key: string | undefined, chain?: number) {
 }
 
 /**
- * Every saved note at a glance -- mostly: is anything still unspent? Each
- * note's commitment and nullifier hash goes to the chain's RPC, which sees the
- * whole set in one session; point --rpc-url at your own node if that matters.
+ * Every saved note and what the chain says of it. Each note's commitment and
+ * nullifier hash goes to the chain's RPC, which sees the whole set in one
+ * session; point --rpc-url at your own node if that matters.
  */
-async function statusAll() {
+type Readable = { file: string; key: string; pool: Pool; note: Note; state: string }
+async function scanNotes(): Promise<{
+  dir: string
+  rows: (Readable | { file: string; unreadable: string })[]
+  readable: Readable[]
+}> {
   const dir = notesDir()
   const files = (existsSync(dir) ? readdirSync(dir) : []).filter((f) => f.endsWith('.txt')).sort()
-  if (!files.length) throw new UsageError(`no notes in ${dir} -- pass a note, or \`-\` and pipe it on stdin`)
-
-  type Readable = { file: string; key: string; pool: Pool; note: Note; state: string }
   const readable: Readable[] = []
   const rows = files.map((file): Readable | { file: string; unreadable: string } => {
     try {
@@ -428,8 +430,14 @@ async function statusAll() {
       log(`${chainName(chains[i]!)}: ${(r.reason as Error).message} -- its notes show as unknown`)
     }
   })
+  return { dir, rows, readable }
+}
 
-  const width = Math.max(4, ...files.map((f) => f.length))
+/** Every saved note at a glance -- mostly: is anything still unspent? */
+async function statusAll() {
+  const { dir, rows, readable } = await scanNotes()
+  if (!rows.length) throw new UsageError(`no notes in ${dir} -- pass a note, or \`-\` and pipe it on stdin`)
+  const width = Math.max(4, ...rows.map((r) => r.file.length))
   out(`${'NOTE'.padEnd(width)} ${'POOL'.padEnd(14)} ${'CHAIN'.padEnd(10)} STATE`)
   for (const r of rows) {
     out(
@@ -442,6 +450,23 @@ async function statusAll() {
   log(
     `${rows.length} notes in ${dir}: ${count('unspent')} unspent, ${count('spent')} spent, ` +
       `${count('not deposited')} never deposited`,
+  )
+}
+
+/**
+ * Delete the saved notes the chain says are spent: withdrawn, so worth
+ * nothing now. Every other note stays -- unspent, never deposited (a deposit
+ * may still land), unknown or unreadable.
+ */
+async function clear(dryRun = false) {
+  const { dir, rows, readable } = await scanNotes()
+  const spent = readable.filter((r) => r.state === 'spent')
+  for (const r of spent) {
+    if (!dryRun) rmSync(join(dir, r.file))
+    out(`${dryRun ? 'would remove' : 'removed'} ${r.file}  (${r.key} on ${chainName(r.pool.chainId)})`)
+  }
+  log(
+    `${spent.length} spent note(s) ${dryRun ? 'to remove' : 'removed'}; ${rows.length - spent.length} other(s) kept in ${dir}`,
   )
 }
 
@@ -857,6 +882,7 @@ const HELP = `uragan -- Tornado Cash from the command line
                                names its pool and chain; it is saved first, like a new one)
   sync <pool>                  pull Deposit events into the leaf cache
   status [note|-]              deposited? spent? leaf index? (no note: every saved note)
+  clear                        delete saved notes the chain says are spent (--dry-run: list them)
   withdraw <note|-> <to>       [--relayer URL] [--fee WEI] | --self | --safe SAFE
                                [--refund WEI] [--dry-run]. No --relayer: the cheapest default
                                relayer that answers. --safe: propose it to that Safe's owners
@@ -923,6 +949,7 @@ try {
     deposit: () => deposit(rest[0], chain, sig, v.note),
     sync: () => syncCmd(rest[0], chain),
     status: () => status(rest[0]),
+    clear: () => clear(v['dry-run']),
     withdraw: () =>
       withdraw(rest[0], rest[1], {
         ...sig,
@@ -945,7 +972,8 @@ try {
   // one about every saved note.
   const only: [keyof typeof v, string[]][] = [
     ['note', ['deposit']],
-    ...(['relayer', 'fee', 'refund', 'self', 'safe', 'dry-run', 'max-fee-percent', 'threads'] as const).map(
+    ['dry-run', ['withdraw', 'clear']],
+    ...(['relayer', 'fee', 'refund', 'self', 'safe', 'max-fee-percent', 'threads'] as const).map(
       (f): [keyof typeof v, string[]] => [f, ['withdraw']],
     ),
     ...(['private-key', 'account', 'keystore', 'from'] as const).map((f): [keyof typeof v, string[]] => [
