@@ -41,6 +41,9 @@ const SAFE = createContract([
 
 const ZERO = '0x0000000000000000000000000000000000000000'
 
+/** Where proposals go; URAGAN_SAFE_TX_SERVICE points at a self-hosted service. */
+const SERVICE = process.env.URAGAN_SAFE_TX_SERVICE ?? 'https://api.safe.global/tx-service'
+
 /** SafeTx as Safe 1.3.0+ hashes it: the domain is the chain and the Safe. */
 const SAFE_TX_TYPES = {
   EIP712Domain: [
@@ -70,20 +73,54 @@ export async function safeNonce(net: RpcClient, chainId: number, safe: string): 
   }
 }
 
+/** The Safe's on-chain nonce, and the proposals waiting in its queue from there on. */
+export type SafeQueue = { nonce: bigint; queued: { nonce: bigint; data: string }[] }
+
+/** What the Safe Transaction Service holds for the Safe, not yet executed. */
+export async function safeQueue(net: RpcClient, chainId: number, safe: string): Promise<SafeQueue> {
+  const prefix = safePrefix(chainId)
+  const nonce = await safeNonce(net, chainId, safe)
+  const queued: SafeQueue['queued'] = []
+  let url: string | null =
+    `${SERVICE}/${prefix}/api/v1/safes/${safe}/multisig-transactions/?executed=false&nonce__gte=${nonce}&limit=100`
+  while (url) {
+    const res = await fetch(url, { signal: AbortSignal.timeout(30_000) })
+    if (!res.ok) throw new Error(`the Safe Transaction Service would not list the Safe's queue (HTTP ${res.status})`)
+    const page = (await res.json()) as {
+      next: string | null
+      results: { nonce: string | number; data: string | null }[]
+    }
+    for (const r of page.results) queued.push({ nonce: BigInt(r.nonce), data: (r.data ?? '0x').toLowerCase() })
+    url = page.next
+  }
+  return { nonce, queued }
+}
+
+/** The queued proposal whose calldata carries `value` as a 32-byte word: a nullifier hash, say. */
+export const queuedWith = (q: SafeQueue, value: bigint) =>
+  q.queued.find((t) => t.data.includes(value.toString(16).padStart(64, '0')))
+
+/**
+ * The nonce for a new proposal: after everything queued. One at a nonce a
+ * queued proposal holds could only ever replace it.
+ */
+export const nextNonce = (q: SafeQueue) => q.queued.reduce((n, t) => (t.nonce >= n ? t.nonce + 1n : n), q.nonce)
+
 export type SafeCall = { to: string; value: bigint; data: Uint8Array }
 
 /**
- * The SafeTx for a plain call at the Safe's current nonce, and its hash as the
- * Safe itself computes it. The call is simulated from the Safe first, so one
- * that would revert is refused before anyone signs.
+ * The SafeTx for a plain call at `nonce`, and its hash as the Safe itself
+ * computes it. The call is simulated from the Safe first -- on today's state,
+ * not on what proposals queued before it would leave -- so one that would
+ * revert is refused before anyone signs.
  */
 export async function prepareSafeTx(
   net: RpcClient,
   chainId: number,
   safe: string,
   call: SafeCall,
+  nonce: bigint,
 ): Promise<{ typed: TypedData; safeTxHash: string }> {
-  const nonce = await safeNonce(net, chainId, safe)
   const data = `0x${bytesToHex(call.data)}`
   const sim = await net.dryRun({ from: safe, to: call.to, value: call.value, data })
   if (!sim.success) throw new UsageError(`executed by the Safe, the call would revert: ${sim.reason}`)
@@ -130,9 +167,10 @@ export async function proposeSafeTx(o: {
   safe: string
   signer: Signer
   call: SafeCall
+  nonce: bigint
 }): Promise<{ safeTxHash: string; queue: string }> {
   const prefix = safePrefix(o.chainId)
-  const { typed, safeTxHash } = await prepareSafeTx(o.net, o.chainId, o.safe, o.call)
+  const { typed, safeTxHash } = await prepareSafeTx(o.net, o.chainId, o.safe, o.call, o.nonce)
   let signature = await o.signer.signTyped(typed)
   if (!/^0x[0-9a-fA-F]{130}$/.test(signature))
     throw new Error(`the signer returned a malformed signature: ${signature}`)
@@ -145,30 +183,27 @@ export async function proposeSafeTx(o: {
   }
 
   const { to, value, data, operation, safeTxGas, baseGas, gasPrice, nonce } = typed.message
-  const res = await fetch(
-    `https://api.safe.global/tx-service/${prefix}/api/v1/safes/${o.safe}/multisig-transactions/`,
-    {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(
-        {
-          to,
-          value,
-          data,
-          operation,
-          safeTxGas,
-          baseGas,
-          gasPrice,
-          nonce,
-          contractTransactionHash: safeTxHash,
-          sender: o.signer.address,
-          signature,
-          origin: 'Uragan',
-        },
-        (_k, v) => (typeof v === 'bigint' ? v.toString() : v),
-      ),
-    },
-  )
+  const res = await fetch(`${SERVICE}/${prefix}/api/v1/safes/${o.safe}/multisig-transactions/`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(
+      {
+        to,
+        value,
+        data,
+        operation,
+        safeTxGas,
+        baseGas,
+        gasPrice,
+        nonce,
+        contractTransactionHash: safeTxHash,
+        sender: o.signer.address,
+        signature,
+        origin: 'Uragan',
+      },
+      (_k, v) => (typeof v === 'bigint' ? v.toString() : v),
+    ),
+  })
   // The service answers in JSON, but proxy and error pages (502s, rate
   // limits) come back as HTML; read text so those still say something useful.
   const text = await res.text()

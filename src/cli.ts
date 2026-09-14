@@ -51,13 +51,12 @@ import {
   RELEASE,
   type Relayer,
   rpcUrl,
-  safePrefix,
   setRpcUrl,
   UsageError,
 } from './config.ts'
 import { assertPrimitives, createNote, hex32, type Note, parseNote, treePath } from './crypto.ts'
 import { prove, witness } from './prover.ts'
-import { proposeSafeTx, safeNonce } from './safe.ts'
+import { nextNonce, proposeSafeTx, queuedWith, safeQueue } from './safe.ts'
 import { makeSigner, type SignerOpts } from './signer.ts'
 
 const log = (s: string) => process.stderr.write(`${s}\n`)
@@ -680,10 +679,12 @@ async function withdraw(noteArg: string | undefined, recipientArg: string | unde
   // Resolve a --self or --safe signer, and the Safe, before syncing and
   // proving, so a misconfiguration fails in a second rather than after all that work.
   const signer = (o.self || safe) && !o.dryRun ? await makeSigner(net, p.chainId, o) : undefined
-  if (safe) {
-    safePrefix(p.chainId)
-    await safeNonce(net, p.chainId, safe)
-  }
+  // A proposal goes after the Safe's queue -- unless one there spends this
+  // note already: both cannot execute, and behind it this one could only revert.
+  const queue = safe ? await safeQueue(net, p.chainId, safe) : undefined
+  const same = queue && queuedWith(queue, n.nullifierHash)
+  if (same) log(`this note has a proposal waiting at nonce ${same.nonce} already; this one takes its place`)
+  const nonce = queue && (same ? same.nonce : nextNonce(queue))
 
   const [spent, deposited] = await Promise.all([
     read(net, p.address, TORNADO.isSpent, bytes32(n.nullifierHash)),
@@ -830,16 +831,17 @@ async function withdraw(noteArg: string | undefined, recipientArg: string | unde
     return
   }
 
-  if (safe) {
+  if (safe && nonce !== undefined) {
     log(`proposing to Safe ${safe} as ${signer!.address}`)
-    const { safeTxHash, queue } = await proposeSafeTx({
+    const proposed = await proposeSafeTx({
       net,
       chainId: p.chainId,
       safe,
       signer: signer!,
       call: { to: p.address, value: refund, data: calldata },
+      nonce,
     })
-    log(`proposed ${safeTxHash}; the owners confirm and execute it at ${queue}`)
+    log(`proposed ${proposed.safeTxHash} at nonce ${nonce}; the owners confirm and execute it at ${proposed.queue}`)
     log('the note stays unspent until then -- `uragan status` shows when it is spent')
     return
   }
