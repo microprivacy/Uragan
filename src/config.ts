@@ -41,6 +41,7 @@ export const ARTIFACTS: Record<string, string> = {
 const CHAINS: Record<number, { name: string; rpc: string; safe: string }> = {
   1: { name: 'Ethereum', rpc: 'https://mainnet.gateway.tenderly.co', safe: 'eth' },
   10: { name: 'Optimism', rpc: 'https://optimism.gateway.tenderly.co', safe: 'oeth' },
+  137: { name: 'Polygon', rpc: 'https://polygon.gateway.tenderly.co', safe: 'pol' },
   42161: { name: 'Arbitrum', rpc: 'https://arbitrum.gateway.tenderly.co', safe: 'arb1' },
 }
 
@@ -56,7 +57,7 @@ export function safePrefix(chainId: number): string {
 /** Frame's local JSON-RPC: the signer when neither a key nor --rpc-url is given. */
 export const FRAME_RPC = 'http://127.0.0.1:1248'
 
-/** A --chain value: a name (ethereum, optimism, arbitrum) or a chain id. */
+/** A --chain value: a name (ethereum, optimism, polygon, arbitrum) or a chain id. */
 export function parseChain(v: string): number {
   if (/^\d+$/.test(v)) return Number(v)
   const hit = Object.entries(CHAINS).find(([, c]) => c.name.toLowerCase() === v.toLowerCase())

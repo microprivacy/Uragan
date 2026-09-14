@@ -110,12 +110,16 @@ function intFlag(flag: string, v: string | undefined, fallback: number, min: num
   return n
 }
 
-const noteKey = (n: { currency: string; amount: string }) => `${n.currency}-${n.amount}`
-
-/** The pool a note belongs to, on the chain the note was made for. */
+/**
+ * The pool a note belongs to, on the chain the note was made for. A note names
+ * its currency, which is not always the registry key: Polygon's pools are
+ * keyed pol-100 after the token's rename, while their notes still say matic,
+ * the string every other Tornado client reads and writes.
+ */
 function notePool(n: { currency: string; amount: string; netId: number }): [string, Pool] {
-  const key = noteKey(n)
-  return [key, pool(n.netId, key)]
+  const hit = Object.entries(pools(n.netId)).find(([, p]) => p.currency === n.currency && p.amount === n.amount)
+  if (!hit) throw new UsageError(`no pool for ${n.currency} ${n.amount} on ${chainName(n.netId)} (see: uragan pools)`)
+  return hit
 }
 
 /**
@@ -784,7 +788,7 @@ const HELP = `uragan -- Tornado Cash from the command line
                                relayer that answers. --safe: propose it to that Safe's owners
   relayers [url...]            query relayer /status endpoints (default: the built-in list)
 
-  --chain NAME                 the chain a <pool> is on: ethereum (default), optimism, arbitrum.
+  --chain NAME                 the chain a <pool> is on: ethereum (default), optimism, polygon, arbitrum.
                                Notes carry their own chain
   --rpc-url URL                your own RPC instead of the public default -- a node, or a
                                wallet, which then also signs. Without --chain, its chain is used

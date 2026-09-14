@@ -95,6 +95,24 @@
       "url": "https://op.theavengers.me"
     }
   },
+  "137": {
+    "dieguis-and-martis.eth": {
+      "rewardAccount": "0x9EDde74078Fba110c22922a925f653BCF1F60121",
+      "url": "https://polygon.dieguis-and-martis.xyz"
+    },
+    "hurricane-relayer.eth": {
+      "rewardAccount": "0x16CB924b5b7ef604139bE95F8762ed817852Db92",
+      "url": "https://polygon.hurricane42.xyz"
+    },
+    "safe-torn.eth": {
+      "rewardAccount": "0x0A5B2bF3cCfB44C1D22F07Eed9553eCba752D4aD",
+      "url": "https://poly3.safetorn.ovh"
+    },
+    "torntool.eth": {
+      "rewardAccount": "0xC0F12799B8D3FA8810DfE1616095170C72117F8F",
+      "url": "https://polygon.theavengers.me"
+    }
+  },
   "42161": {
     "dieguis-and-martis.eth": {
       "rewardAccount": "0x9EDde74078Fba110c22922a925f653BCF1F60121",

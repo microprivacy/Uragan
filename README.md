@@ -4,7 +4,7 @@ Lightweight and modern CLI for Tornado Cash.
 
 ## Features
 
-- Ethereum, Optimism and Arbitrum: all 27 pools
+- Ethereum, Optimism, Polygon and Arbitrum: all 31 pools
 - Withdraw via a relayer (the cheapest that answers, by default), yourself, or a Safe
 - Sign with Frame, a private key, a keystore or any wallet RPC
 - Local multithreaded prover in pure JS (~10 s)

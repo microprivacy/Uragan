@@ -210,6 +210,44 @@
       "tokenAddress": null
     }
   },
+  "137": {
+    "pol-100": {
+      "currency": "matic",
+      "amount": "100",
+      "address": "0x1E34A77868E19A6647b1f2F47B51ed72dEDE95DD",
+      "deployedBlock": 16258013,
+      "symbol": "POL",
+      "decimals": 18,
+      "tokenAddress": null
+    },
+    "pol-1000": {
+      "currency": "matic",
+      "amount": "1000",
+      "address": "0xdf231d99Ff8b6c6CBF4E9B9a945CBAcEF9339178",
+      "deployedBlock": 16258032,
+      "symbol": "POL",
+      "decimals": 18,
+      "tokenAddress": null
+    },
+    "pol-10000": {
+      "currency": "matic",
+      "amount": "10000",
+      "address": "0xaf4c0B70B2Ea9FB7487C7CbB37aDa259579fe040",
+      "deployedBlock": 16258046,
+      "symbol": "POL",
+      "decimals": 18,
+      "tokenAddress": null
+    },
+    "pol-100000": {
+      "currency": "matic",
+      "amount": "100000",
+      "address": "0xa5C2254e4253490C54cef0a4347fddb8f75A4998",
+      "deployedBlock": 16258053,
+      "symbol": "POL",
+      "decimals": 18,
+      "tokenAddress": null
+    }
+  },
   "42161": {
     "eth-0.1": {
       "currency": "eth",
