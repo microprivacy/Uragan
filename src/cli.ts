@@ -890,7 +890,9 @@ try {
 } catch (e) {
   // parseArgs rejects an unknown flag or a missing value with ERR_PARSE_ARGS_*:
   // a usage mistake too, so no stack trace either way.
-  const usage = e instanceof UsageError || (e as NodeJS.ErrnoException).code?.startsWith('ERR_PARSE_ARGS')
+  // Node's own errors carry string codes; JSON-RPC errors carry numbers (4001: rejected in the wallet).
+  const code = (e as { code?: unknown }).code
+  const usage = e instanceof UsageError || (typeof code === 'string' && code.startsWith('ERR_PARSE_ARGS'))
   log(`error: ${(e as Error).message}`)
   if (process.env.DEBUG) log((e as Error).stack ?? '')
   process.exit(usage ? 2 : 1)
