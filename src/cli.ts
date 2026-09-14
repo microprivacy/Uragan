@@ -252,10 +252,24 @@ async function noteCmd(key: string | undefined, chain?: number) {
   out(createNote(p.currency, p.amount, p.chainId).note)
 }
 
-async function deposit(key: string | undefined, chain: number | undefined, sig: SignerOpts) {
-  if (!key) throw new UsageError('usage: uragan deposit <pool>')
+async function deposit(key: string | undefined, chain: number | undefined, sig: SignerOpts, noteArg?: string) {
+  if (!key) throw new UsageError('usage: uragan deposit <pool> [--note <note|->]')
   const { net, p } = await connectPool(key, chain)
   await assertPool(net, p, key)
+  // --note deposits a note you already hold -- from an attempt that never
+  // landed, or made offline by `uragan note` -- instead of making another.
+  const existing = noteArg === undefined ? undefined : parseNote(await requireNote(noteArg))
+  if (existing) {
+    const [was, from] = notePool(existing)
+    if (from.address !== p.address) {
+      throw new UsageError(
+        `that note is for ${was} on ${chainName(existing.netId)}, not ${key} on ${chainName(p.chainId)}`,
+      )
+    }
+    if (await read(net, p.address, TORNADO.commitments, bytes32(existing.commitment))) {
+      throw new UsageError('that note is deposited already -- `uragan status` says whether it is still unspent')
+    }
+  }
   const signer = await makeSigner(net, p.chainId, sig)
   const amount = parseUnits(p.amount, p.decimals)
 
@@ -273,7 +287,7 @@ async function deposit(key: string | undefined, chain: number | undefined, sig: 
     }
   }
 
-  const n = createNote(p.currency, p.amount, p.chainId)
+  const n = existing ?? createNote(p.currency, p.amount, p.chainId)
   const call = {
     to: p.address,
     value: p.tokenAddress ? 0n : amount,
@@ -292,16 +306,21 @@ async function deposit(key: string | undefined, chain: number | undefined, sig: 
   }
 
   // Persist the note BEFORE broadcasting. A funded deposit whose note is lost
-  // is unrecoverable; an orphan note for a failed deposit is harmless.
-  const dir = join(HOME, 'notes')
-  mkdirSync(dir, { recursive: true, mode: 0o700 })
-  const file = join(
-    dir,
-    `${new Date().toISOString().replace(/[:.]/g, '')}-${chainName(p.chainId).toLowerCase()}-${key}.txt`,
-  )
-  writeFileSync(file, `${n.note}\n`, { mode: 0o600 })
-  out(n.note)
-  log(`note saved to ${file} -- back it up. Without it the funds are GONE.`)
+  // is unrecoverable; an orphan note for a failed deposit is harmless. A note
+  // passed with --note is already saved wherever its holder keeps it.
+  if (existing) {
+    log('depositing the note you passed; it is neither printed nor saved again')
+  } else {
+    const dir = join(HOME, 'notes')
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    const file = join(
+      dir,
+      `${new Date().toISOString().replace(/[:.]/g, '')}-${chainName(p.chainId).toLowerCase()}-${key}.txt`,
+    )
+    writeFileSync(file, `${n.note}\n`, { mode: 0o600 })
+    out(n.note)
+    log(`note saved to ${file} -- back it up. Without it the funds are GONE.`)
+  }
 
   log(`depositing ${p.amount} ${p.symbol} into ${p.address} from ${signer.address} ...`)
   try {
@@ -780,7 +799,8 @@ const HELP = `uragan -- Tornado Cash from the command line
   pools                        every pool, with live deposit counts
   verify                       re-check every pool address on-chain
   note <pool>                  generate a note offline (no transaction)
-  deposit <pool>               generate a note and deposit
+  deposit <pool>               generate a note and deposit; --note <note|-> deposits one
+                               you already hold, e.g. after an attempt that failed
   sync <pool>                  pull Deposit events into the leaf cache
   status [note|-]              deposited? spent? leaf index? (no note: every saved note)
   withdraw <note|-> <to>       [--relayer URL] [--fee WEI] | --self | --safe SAFE
@@ -813,6 +833,7 @@ const OPTIONS = {
   'max-fee-percent': { type: 'string' },
   self: { type: 'boolean' },
   safe: { type: 'string' },
+  note: { type: 'string' },
   'dry-run': { type: 'boolean' },
   account: { type: 'string' },
   keystore: { type: 'string' },
@@ -845,7 +866,7 @@ try {
     pools: () => poolsCmd(chain),
     verify: () => verifyCmd(chain),
     note: () => noteCmd(rest[0], chain),
-    deposit: () => deposit(rest[0], chain, sig),
+    deposit: () => deposit(rest[0], chain, sig, v.note),
     sync: () => syncCmd(rest[0], chain),
     status: () => status(rest[0]),
     withdraw: () =>
