@@ -52,6 +52,26 @@ const CHAINS: Record<number, { name: string; rpc: string; safe: string }> = {
 
 export const chainName = (id: number) => CHAINS[id]?.name ?? `chain ${id}`
 
+/**
+ * What the Tornado website and tornado-cli send deposits and withdrawals
+ * through, so a transaction to it looks like theirs; a call straight to the
+ * pool marks the sender as some other client. On Ethereum it is governance's
+ * TornadoRouter, which pulls a token pool's tokens itself. Elsewhere it is
+ * TornadoProxyLight, which only forwards ETH -- those chains' pools are native.
+ */
+const ROUTERS: Record<number, { address: string; tokens: boolean }> = {
+  1: { address: '0xd90e2f925DA726b50C4Ed8D0Fb90Ad053324F31b', tokens: true },
+  10: { address: '0x0D5550d52428E7e3175bfc9550207e4ad3859b17', tokens: false },
+  137: { address: '0x0D5550d52428E7e3175bfc9550207e4ad3859b17', tokens: false },
+  42161: { address: '0x0D5550d52428E7e3175bfc9550207e4ad3859b17', tokens: false },
+}
+
+/** The router for a pool, or undefined where the pool is called directly. */
+export function routerFor(p: Pool): string | undefined {
+  const r = ROUTERS[p.chainId]
+  return r && (r.tokens || !p.tokenAddress) ? r.address : undefined
+}
+
 /** The chain's EIP-3770 short name, for the Safe Transaction Service and app. */
 export function safePrefix(chainId: number): string {
   const prefix = CHAINS[chainId]?.safe

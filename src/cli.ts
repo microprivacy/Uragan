@@ -28,6 +28,7 @@ import {
   dropCache,
   ERC20,
   poolTree,
+  ROUTER,
   read,
   rpc,
   switchChain,
@@ -50,6 +51,7 @@ import {
   pools,
   RELEASE,
   type Relayer,
+  routerFor,
   rpcUrl,
   setRpcUrl,
   UsageError,
@@ -310,27 +312,39 @@ async function deposit(keyArg: string | undefined, chain: number | undefined, si
   }
   const signer = await makeSigner(net, p.chainId, sig)
   const amount = parseUnits(p.amount, p.decimals)
+  // Through the router where there is one, which then takes the tokens.
+  const router = routerFor(p)
+  const spender = router ?? p.address
 
   if (p.tokenAddress) {
-    const allowance = await read(net, p.tokenAddress, ERC20.allowance, { owner: signer.address, spender: p.address })
+    const allowance = await read(net, p.tokenAddress, ERC20.allowance, { owner: signer.address, spender })
     if (allowance < amount) {
       // USDT, among others, reverts when one non-zero allowance is changed to
       // another; a deposit that failed after approving leaves exactly that.
       if (allowance > 0n) {
         log(`resetting the ${p.symbol} allowance to 0 first ...`)
-        await signer.send({ to: p.tokenAddress, data: ERC20.approve.encodeInput({ spender: p.address, amount: 0n }) })
+        await signer.send({ to: p.tokenAddress, data: ERC20.approve.encodeInput({ spender, amount: 0n }) })
       }
       log(`approving ${p.amount} ${p.symbol} ...`)
-      await signer.send({ to: p.tokenAddress, data: ERC20.approve.encodeInput({ spender: p.address, amount }) })
+      await signer.send({ to: p.tokenAddress, data: ERC20.approve.encodeInput({ spender, amount }) })
     }
   }
 
   const n = existing ?? createNote(p.currency, p.amount, p.chainId)
-  const call = {
-    to: p.address,
-    value: p.tokenAddress ? 0n : amount,
-    data: TORNADO.deposit.encodeInput(bytes32(n.commitment)),
-  }
+  const value = p.tokenAddress ? 0n : amount
+  const commitment = bytes32(n.commitment)
+  // No note backup, as nearly all router deposits carry none.
+  const call = router
+    ? {
+        to: router,
+        value,
+        data: ROUTER.deposit.encodeInput({
+          _tornado: p.address,
+          _commitment: commitment,
+          _encryptedNote: new Uint8Array(),
+        }),
+      }
+    : { to: p.address, value, data: TORNADO.deposit.encodeInput(commitment) }
   // Dry-run first, so an empty balance or a bad allowance fails before a note exists.
   try {
     await net.estimateGas({
@@ -795,12 +809,17 @@ async function withdraw(noteArg: string | undefined, recipientArg: string | unde
     _fee: fee,
     _refund: refund,
   }
-  const calldata = TORNADO.withdraw.encodeInput(args)
+  // Sent yourself or by a Safe, through the router, as the website sends it.
+  const router = routerFor(p)
+  const target = router ?? p.address
+  const calldata = router
+    ? ROUTER.withdraw.encodeInput({ _tornado: p.address, ...args })
+    : TORNADO.withdraw.encodeInput(args)
   if (o.dryRun) {
     out(
       JSON.stringify(
         {
-          contract: p.address,
+          contract: target,
           recipient,
           relayer,
           fee: String(fee),
@@ -838,7 +857,7 @@ async function withdraw(noteArg: string | undefined, recipientArg: string | unde
       chainId: p.chainId,
       safe,
       signer: signer!,
-      call: { to: p.address, value: refund, data: calldata },
+      call: { to: target, value: refund, data: calldata },
       nonce,
     })
     log(`proposed ${proposed.safeTxHash} at nonce ${nonce}; the owners confirm and execute it at ${proposed.queue}`)
@@ -847,7 +866,7 @@ async function withdraw(noteArg: string | undefined, recipientArg: string | unde
   }
 
   log(`submitting from ${signer!.address} -- this links that address to the withdrawal`)
-  log(`withdrawn: ${await signer!.send({ to: p.address, value: refund, data: calldata })}`)
+  log(`withdrawn: ${await signer!.send({ to: target, value: refund, data: calldata })}`)
 }
 
 /** The /status of the relayers given, else of the default relayers on --chain, or on every chain. */

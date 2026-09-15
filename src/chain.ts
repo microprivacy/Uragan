@@ -246,6 +246,28 @@ export const ERC20_ABI = [
 
 /** The ABIs, bound once. Calldata comes from these; view calls go through `read`. */
 export const TORNADO = createContract(TORNADO_ABI)
+
+/** TornadoRouter and TornadoProxyLight alike: the pool, then what the pool itself takes. */
+export const ROUTER = createContract([
+  {
+    type: 'function',
+    name: 'deposit',
+    stateMutability: 'payable',
+    inputs: [
+      { name: '_tornado', type: 'address' },
+      { name: '_commitment', type: 'bytes32' },
+      { name: '_encryptedNote', type: 'bytes' },
+    ],
+    outputs: [],
+  },
+  {
+    type: 'function',
+    name: 'withdraw',
+    stateMutability: 'payable',
+    inputs: [{ name: '_tornado', type: 'address' }, ...TORNADO_ABI[1].inputs],
+    outputs: [],
+  },
+] as const)
 export const VERIFIER = createContract(VERIFIER_ABI)
 export const ERC20 = createContract(ERC20_ABI)
 
