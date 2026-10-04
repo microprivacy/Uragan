@@ -8,5 +8,5 @@ notes/
 # npm
 node_modules/
 
-# build output
+# Emitted for the npm package only; everything else runs the sources
 dist/

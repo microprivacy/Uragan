@@ -6,14 +6,19 @@
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import INSTANCES from './instances.json' with { type: 'json' }
+import RELAYERS from './relayers.json' with { type: 'json' }
 
 /** A mistake in how the command was invoked -- printed without a stack trace. */
 export class UsageError extends Error {}
 
-export const ROOT = fileURLToPath(new URL('..', import.meta.url))
-export const ASSETS = process.env.URAGAN_ASSETS ?? join(ROOT, 'assets')
 export const HOME = process.env.URAGAN_HOME ?? join(homedir(), '.local/share/uragan')
+/**
+ * Circuit and keys sit beside the notes rather than in the checkout: installed
+ * from a registry, the checkout is somebody's global node_modules -- often
+ * unwritable, and emptied by the next upgrade.
+ */
+export const ASSETS = process.env.URAGAN_ASSETS ?? join(HOME, 'assets')
 
 /**
  * The first eth_getLogs block range. Sync pages through history with ranges it
@@ -137,7 +142,8 @@ export type Pool = {
  */
 let parsed: Record<string, Record<string, Omit<Pool, 'chainId'>>> | undefined
 function registry(): Record<string, Record<string, Omit<Pool, 'chainId'>>> {
-  parsed ??= JSON.parse(readFileSync(process.env.URAGAN_INSTANCES ?? join(ROOT, 'src/instances.json'), 'utf8'))
+  const file = process.env.URAGAN_INSTANCES
+  parsed ??= file ? JSON.parse(readFileSync(file, 'utf8')) : INSTANCES
   return parsed!
 }
 
@@ -180,9 +186,6 @@ export type Relayer = {
  * withdrawal re-checks every one before picking.
  */
 export function defaultRelayers(chainId: number): Relayer[] {
-  const all = JSON.parse(readFileSync(join(ROOT, 'src/relayers.json'), 'utf8'))
-  return Object.entries((all[chainId] ?? {}) as Record<string, Omit<Relayer, 'name'>>).map(([name, r]) => ({
-    name,
-    ...r,
-  }))
+  const all: Record<string, Record<string, Omit<Relayer, 'name'>>> = RELAYERS
+  return Object.entries(all[chainId] ?? {}).map(([name, r]) => ({ name, ...r }))
 }

@@ -10,15 +10,15 @@ Lightweight and modern CLI for Tornado Cash.
 - Local multithreaded prover in pure JS (~10 s)
 - Proofs checked on-chain before sending
 - Resumable, reorg-safe sync
-- 3 dependencies, no build step
+- 3 dependencies, bundled in: an install adds one package
+- Node runs the sources as they are; only the published bundle is built
 
 ## Install
 
 Requires Node ≥ 22.18.
 
 ```sh
-pnpm install
-ln -s $PWD/src/cli.ts ~/.local/bin/uragan
+pnpm i -g uragan
 uragan setup   # download circuit + keys, check their pinned sha256
 ```
 
